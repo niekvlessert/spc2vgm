@@ -191,13 +191,33 @@ static std::vector<Write> trace_spc(const Bytes& data, double seconds) {
 	std::array<int,8> env;
 	for(int v=0;v<8;++v)env[v]=spc.dsp.read(v*16+SPC_DSP::v_envx);
 	int pairs_left = int(seconds * SNES_SPC::sample_rate + .5);
+	// Track which voices received a KON write within the current 32-pair block so we
+	// can force an ENVX event at the block boundary even when the final ENVX value
+	// equals the previous one.  This handles fast-attack voices (attack_rate==15)
+	// whose envelope drops to 0 on KON and returns to full within just a couple of
+	// samples – making the block-end ENVX identical to the pre-KON value and thus
+	// producing no change-event.  Without the forced event, playback() would never
+	// learn that the envelope reset and would keep env[v]==0 after the KON.
+	uint8_t kon_dirty = 0; // bitmask of voices that received KON this block
 	while (pairs_left > 0) {
+		kon_dirty = 0;
+		// Bookmark write-vector size before this block so we only scan new entries.
+		const size_t block_write_start = writes.size();
 		int pairs = std::min(pairs_left, 32);
 		if (auto e = spc.play(pairs * 2, audio.data())) throw std::runtime_error(e);
 		trace_clock_base += int64_t(pairs) * (SPC_CLOCK / SNES_SPC::sample_rate); pairs_left -= pairs;
+		// Collect KON writes appended by spc_trace_dsp_write during this block.
+		for (size_t i = block_write_start; i < writes.size(); ++i)
+			if (writes[i].reg == 0x4c)
+				kon_dirty |= writes[i].value;
 		for(int v=0;v<8;++v){
 			int value=spc.dsp.read(v*16+SPC_DSP::v_envx);
-			if(value!=env[v]){env[v]=value;writes.push_back({trace_clock_base,uint8_t(0x80+v),uint8_t(value)});}
+			// Force-emit ENVX for voices that received KON this block, even when the
+			// sampled value hasn't changed (fast-attack case).
+			if(value!=env[v] || (kon_dirty&(1<<v))){
+				env[v]=value;
+				writes.push_back({trace_clock_base,uint8_t(0x80+v),uint8_t(value)});
+			}
 		}
 	}
 	trace_target = nullptr;
@@ -354,8 +374,8 @@ static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const 
 			int sample=wave-OPL4_RAM_WAVE_BASE;if(sample<0||sample>=int(samples.size())||samples[sample].looped)continue;
 			int delay=std::max(1,er[0x7d]&15)*16*VGM_RATE/1000;double master=std::max(std::abs(signed8(er[0x0c])),std::abs(signed8(er[0x1c]))),echo=std::max(std::abs(signed8(er[0x2c])),std::abs(signed8(er[0x3c])));
 			if(master<=0||echo<=0)continue;double echo_gain=gain+20*std::log10(echo/master),feedback=std::abs(signed8(er[0x0d]))/128.0;
-			echo_hits.push_back({std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK)+delay,8+v,v,wave,echo_gain,er});
-			if(feedback>0)echo_hits.push_back({std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK)+2*delay,16+v,v,wave,echo_gain+20*std::log10(feedback),er});
+			int64_t base=std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK);double amp=1.0;
+			for(int k=1;k<=16;++k){echo_hits.push_back({base+(int64_t)k*delay,(k&1)?8+v:16+v,v,wave,echo_gain+20*std::log10(amp),er});if(feedback<=0)break;amp*=feedback;if(amp<0.03)break;}
 		}
 	}
 	std::sort(echo_hits.begin(),echo_hits.end(),[](const EchoHit&a,const EchoHit&b){return a.time<b.time;});size_t next_echo=0;
@@ -365,7 +385,15 @@ static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const 
 	for(auto e:events){int64_t t=std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK);flush_echo(t);
 		if(e.reg>=0x80){int v=e.reg-0x80;env[v]=e.value;if((solo<0||solo==v)&&active[v])level(o,v,r,gain,minimum,true,env[v]);continue;}
 		r[e.reg]=e.value;
-		if(e.reg==0x4c){for(int v=0;v<8;++v)if((e.value&(1<<v))&&(solo<0||solo==v)&&wave_for(v)>=0){env[v]=0;aw[v]=wave_for(v);key_on(o,v,v,aw[v],r,gain,minimum,env[v]);active[v]=true;}}
+		if(e.reg==0x4c){for(int v=0;v<8;++v)if((e.value&(1<<v))&&(solo<0||solo==v)&&wave_for(v)>=0){
+			// Do NOT reset env[v] to 0 here: for fast-attack voices (attack_rate==15)
+			// the ENVX returns to its pre-KON level within ~2 SPC samples, which is
+			// faster than the 32-pair ENVX polling interval.  trace_spc() now
+			// force-emits an ENVX event after any KON block, so the envelope will
+			// be updated correctly regardless.  Keeping the current env[v] ensures
+			// the OPL4 TL is set to the correct level at key_on time rather than
+			// being muted until the next ENVX event arrives.
+			aw[v]=wave_for(v);key_on(o,v,v,aw[v],r,gain,minimum,env[v]);active[v]=true;}}
 		else if(e.reg==0x5c){}
 		else if(e.reg==0x0c||e.reg==0x1c){for(int v=0;v<8;++v)if(active[v]&&(solo<0||solo==v))level(o,v,r,gain,minimum,true,env[v]);}
 		else if(e.reg==0x2d||e.reg==0x3d||e.reg==0x4d){for(int v=0;v<8;++v)if(active[v]&&(solo<0||solo==v)){if(e.reg==0x2d)reg(o,2,0x80+v,(e.value&(1<<v))?7:0);else if(e.reg==0x4d){int b=v*16;auto[fn,oct]=pitch(r[b+2]|((r[b+3]&63)<<8));reg(o,2,0x38+v,(oct<<4)|((fn>>7)&7)|((e.value&(1<<v))?8:0));}else{int w=wave_for(v);if(w>=0&&w!=aw[v]){int b=v*16;wave_pitch(o,v,w,r[b+2]|((r[b+3]&63)<<8));reg(o,2,8+v,w);aw[v]=w;}}}}
