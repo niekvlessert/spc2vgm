@@ -1,3 +1,6 @@
 [submodule "external/smwcentral-spc-player"]
 	path = external/smwcentral-spc-player
 	url = https://github.com/telinc1/smwcentral-spc-player
+[submodule "external/libvgm"]
+	path = external/libvgm
+	url = https://github.com/ValleyBell/libvgm.git

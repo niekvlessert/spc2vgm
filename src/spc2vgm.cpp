@@ -16,6 +16,9 @@
 #include <vector>
 
 #include "SNES_SPC.h"
+#include "player/playera.hpp"
+#include "player/vgmplayer.hpp"
+#include "utils/MemoryLoader.h"
 
 namespace fs = std::filesystem;
 using Bytes = std::vector<uint8_t>;
@@ -37,11 +40,19 @@ struct Sample {
 	std::vector<int> srcn_aliases;
 };
 struct Timing { double duration; std::optional<double> loop_start; };
+struct AudioStats {
+	long double square_sum = 0;
+	uint64_t samples = 0;
+	uint64_t clipped = 0;
+	int peak = 0;
+
+	double rms() const { return samples ? std::sqrt(double(square_sum / samples)) : 0; }
+};
 struct Options {
 	fs::path input, output, manifest, batch, batch_output, manifest_output;
-	double playback = -1, fallback = 120, header_gain = 12, hardware_gain = 6;
+	double playback = -1, fallback = 120, header_gain = 0, hardware_gain = 6;
 	int minimum_tl = 8, max_samples = 128, solo_voice = -1;
-	bool auto_playback = false, no_loop_detect = false;
+	bool auto_playback = false, no_loop_detect = false, header_gain_set = false;
 };
 
 static std::vector<Write>* trace_target;
@@ -189,6 +200,31 @@ static std::vector<Write> trace_spc(const Bytes& data, double seconds) {
 	return writes;
 }
 
+static AudioStats render_spc_stats(const Bytes& data, double seconds, int solo)
+{
+	SNES_SPC spc;
+	if (const char* error = spc.init()) throw std::runtime_error(error);
+	if (const char* error = spc.load_spc(data.data(), data.size())) throw std::runtime_error(error);
+	if (solo >= 0) spc.mute_voices(0xFF & ~(1 << solo));
+
+	AudioStats stats;
+	std::vector<SNES_SPC::sample_t> audio(2048);
+	int pairs_left = int(seconds * SNES_SPC::sample_rate + .5);
+	while (pairs_left > 0) {
+		const int pairs = std::min(pairs_left, 1024);
+		if (const char* error = spc.play(pairs * 2, audio.data())) throw std::runtime_error(error);
+		for (int i = 0; i < pairs * 2; ++i) {
+			const int value = audio[i];
+			stats.square_sum += static_cast<long double>(value) * value;
+			stats.peak = std::max(stats.peak, std::abs(value));
+			if (std::abs(value) >= 32767) ++stats.clipped;
+			++stats.samples;
+		}
+		pairs_left -= pairs;
+	}
+	return stats;
+}
+
 static Timing timing(const Bytes& d, double fallback) {
 	for (size_t off = SPC_DSP_OFFSET + SPC_DSP_SIZE; off + 8 <= d.size(); ++off) if (!std::memcmp(d.data() + off, "xid6", 4)) {
 		size_t end = std::min(d.size(), off + 8 + le32(d.data() + off + 4)); std::array<uint32_t, 256> val{};
@@ -290,9 +326,50 @@ static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const 
 static Bytes build_vgm(const Bytes&ram,const Tail&t,double gain){
 	Bytes cmd={0x67,0x66,0x84};append32(cmd,8);append32(cmd,OPL4_ROM_SIZE);append32(cmd,0);
 	cmd.insert(cmd.end(),{0x67,0x66,0x87});append32(cmd,8+ram.size());append32(cmd,OPL4_RAM_SIZE);append32(cmd,0);cmd.insert(cmd.end(),ram.begin(),ram.end());size_t tail=cmd.size();cmd.insert(cmd.end(),t.bytes.begin(),t.bytes.end());cmd.push_back(0x66);
-	Bytes v(VGM_HEADER_SIZE);std::copy_n("Vgm ",4,v.begin());put32(v,8,0x171);put32(v,0x18,t.total);put32(v,0x24,60);put32(v,0x34,VGM_HEADER_SIZE-0x34);put32(v,0x60,OPL4_CLOCK);v[0x7c]=uint8_t(std::clamp(int(std::lround(gain*16/6)), -64,192));
+	Bytes v(VGM_HEADER_SIZE);std::copy_n("Vgm ",4,v.begin());put32(v,8,0x171);put32(v,0x18,t.total);put32(v,0x24,60);put32(v,0x34,VGM_HEADER_SIZE-0x34);put32(v,0x60,OPL4_CLOCK);v[0x7c]=uint8_t(std::clamp(int(std::lround(gain*32/6)), -64,192));
 	if(t.loop_offset){uint32_t absolute=VGM_HEADER_SIZE+tail+*t.loop_offset;put32(v,0x1c,absolute-0x1c);put32(v,0x20,t.total-t.loop_sample);}
 	v.insert(v.end(),cmd.begin(),cmd.end());put32(v,4,v.size()-4);return v;
+}
+static AudioStats render_vgm_stats(const Bytes& vgm, int frames)
+{
+	PlayerA player;
+	player.RegisterPlayerEngine(new VGMPlayer);
+	if (player.SetOutputSettings(VGM_RATE, 2, 16, 2048))
+		throw std::runtime_error("libvgm rejected calibration output settings");
+	PlayerA::Config config = player.GetConfiguration();
+	config.masterVol = 0x10000;
+	config.ignoreVolGain = false;
+	config.loopCount = 1;
+	config.fadeSmpls = 0;
+	config.endSilenceSmpls = 0;
+	player.SetConfiguration(config);
+
+	DATA_LOADER* loader = MemoryLoader_Init(vgm.data(), vgm.size());
+	if (!loader || MemoryLoader_Load(loader) || player.LoadFile(loader) || player.Start()) {
+		if (loader) MemoryLoader_Deinit(loader);
+		throw std::runtime_error("unable to render generated VGM for volume calibration");
+	}
+
+	AudioStats stats;
+	std::vector<int16_t> audio(2048 * 2);
+	int remaining = frames;
+	while (remaining > 0) {
+		const int count = std::min(remaining, 2048);
+		player.Render(count * 2 * sizeof(int16_t), audio.data());
+		for (int i = 0; i < count * 2; ++i) {
+			const int value = audio[i];
+			stats.square_sum += static_cast<long double>(value) * value;
+			stats.peak = std::max(stats.peak, std::abs(value));
+			if (std::abs(value) >= 32767) ++stats.clipped;
+			++stats.samples;
+		}
+		remaining -= count;
+	}
+	player.Stop();
+	player.UnloadFile();
+	player.UnregisterAllPlayers();
+	MemoryLoader_Deinit(loader);
+	return stats;
 }
 static void manifest(const fs::path&p,const std::vector<Sample>&s){
 	fs::create_directories(p.parent_path());std::ofstream o(p);o<<"wave,srcn,srcn_aliases,start_hex,loop_hex,brr_bytes,pcm_samples,loop_sample,looped\n";
@@ -306,14 +383,32 @@ static void convert(const fs::path&in,const fs::path&out,const fs::path&csv,cons
 	events.erase(std::remove_if(events.begin(), events.end(), [=](const Write& w) {
 		return w.clock > playback_end;
 	}), events.end());
-	Tail tail=playback(d.data()+SPC_DSP_OFFSET,samples,events,seconds,opt.hardware_gain,opt.minimum_tl,opt.solo_voice,loop);write_file(out,build_vgm(ram,tail,opt.header_gain));if(!csv.empty())manifest(csv,samples);
+	Tail tail=playback(d.data()+SPC_DSP_OFFSET,samples,events,seconds,opt.hardware_gain,opt.minimum_tl,opt.solo_voice,loop);
+	double header_gain = opt.header_gain;
+	if (!opt.header_gain_set) {
+		const AudioStats original = render_spc_stats(d, seconds, opt.solo_voice);
+		const Bytes provisional = build_vgm(ram, tail, 0);
+		const AudioStats converted = render_vgm_stats(provisional, tail.total);
+		if (original.rms() > 0 && converted.rms() > 0) {
+			const double wanted_steps = std::log2(original.rms() / converted.rms()) * 32.0;
+			const double safe_steps = converted.peak > 0 ? std::log2(32767.0 / converted.peak) * 32.0 : wanted_steps;
+			const int gain_steps = std::clamp(int(std::lround(std::min(wanted_steps, safe_steps))), -64, 192);
+			header_gain = gain_steps * 6.0 / 32.0;
+			const AudioStats matched = render_vgm_stats(build_vgm(ram, tail, header_gain), tail.total);
+			std::cout << "volume match: SPC RMS " << original.rms() << ", VGM RMS " << matched.rms()
+				<< ", gain " << header_gain << " dB, error "
+				<< 20.0 * std::log10(matched.rms() / original.rms()) << " dB, clipped "
+				<< matched.clipped << "\n";
+		}
+	}
+	write_file(out,build_vgm(ram,tail,header_gain));if(!csv.empty())manifest(csv,samples);
 	std::cout<<"wrote "<<out<<" ("<<samples.size()<<" samples, "<<ram.size()<<" OPL4 RAM bytes, "<<seconds<<" seconds";
 	if(loop)std::cout<<", loop "<<*loop<<"s";std::cout<<")\n";
 }
 static void usage(const char*n){std::cerr<<"usage: "<<n<<" input.spc [-o output.vgm] [--manifest file.csv] [--auto-playback]\n       "<<n<<" --batch DIR [--batch-output DIR] [--manifest-output DIR]\n"; }
 static Options parse(int ac,char**av){
 	Options o;for(int i=1;i<ac;++i){std::string a=av[i];auto value=[&](){if(++i>=ac)throw std::runtime_error("missing value after "+a);return std::string(av[i]);};
-		if(a=="-o"||a=="--output")o.output=value();else if(a=="--manifest")o.manifest=value();else if(a=="--batch")o.batch=value();else if(a=="--batch-output")o.batch_output=value();else if(a=="--manifest-output")o.manifest_output=value();else if(a=="--playback")o.playback=std::stod(value());else if(a=="--fallback-seconds")o.fallback=std::stod(value());else if(a=="--playback-gain-db")o.header_gain=std::stod(value());else if(a=="--hardware-gain-db")o.hardware_gain=std::stod(value());else if(a=="--minimum-tl")o.minimum_tl=std::stoi(value());else if(a=="--max-samples")o.max_samples=std::stoi(value());else if(a=="--solo-voice")o.solo_voice=std::stoi(value());else if(a=="--auto-playback")o.auto_playback=true;else if(a=="--no-loop-detect")o.no_loop_detect=true;else if(a=="-h"||a=="--help"){usage(av[0]);std::exit(0);}else if(a[0]=='-')throw std::runtime_error("unknown option "+a);else o.input=a;
+		if(a=="-o"||a=="--output")o.output=value();else if(a=="--manifest")o.manifest=value();else if(a=="--batch")o.batch=value();else if(a=="--batch-output")o.batch_output=value();else if(a=="--manifest-output")o.manifest_output=value();else if(a=="--playback")o.playback=std::stod(value());else if(a=="--fallback-seconds")o.fallback=std::stod(value());else if(a=="--playback-gain-db"){o.header_gain=std::stod(value());o.header_gain_set=true;}else if(a=="--hardware-gain-db")o.hardware_gain=std::stod(value());else if(a=="--minimum-tl")o.minimum_tl=std::stoi(value());else if(a=="--max-samples")o.max_samples=std::stoi(value());else if(a=="--solo-voice")o.solo_voice=std::stoi(value());else if(a=="--auto-playback")o.auto_playback=true;else if(a=="--no-loop-detect")o.no_loop_detect=true;else if(a=="-h"||a=="--help"){usage(av[0]);std::exit(0);}else if(a[0]=='-')throw std::runtime_error("unknown option "+a);else o.input=a;
 	}return o;
 }
 int main(int ac,char**av){try{Options o=parse(ac,av);if(!o.batch.empty()){fs::path out=o.batch_output.empty()?o.batch/"vgm":o.batch_output;std::vector<fs::path> files;for(auto&e:fs::directory_iterator(o.batch))if(e.path().extension()==".spc")files.push_back(e.path());std::sort(files.begin(),files.end());for(auto&p:files){fs::path csv=o.manifest_output.empty()?fs::path{}:o.manifest_output/(p.stem().string()+".csv");convert(p,out/(p.stem().string()+".vgm"),csv,o);}return 0;}if(o.input.empty()){usage(av[0]);return 2;}if(o.output.empty()){o.output=o.input;o.output.replace_extension(".vgm");}convert(o.input,o.output,o.manifest,o);return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

@@ -8,6 +8,13 @@ The conversion is approximate because OPL4 cannot reproduce every SNES DSP
 feature exactly, but the generated files use the original instrument samples
 and preserve song timing and detected loop points.
 
+Each conversion renders the original SPC and provisional VGM internally, then
+sets a per-track VGM gain so their full-track stereo RMS levels match. The
+converter prints the final rendered RMS error and clipping count. VGM header
+gain has approximately 0.188 dB resolution, so the result is the closest
+representable unclipped match. `--playback-gain-db DB` overrides automatic
+volume matching.
+
 ## Build
 
 ```sh
