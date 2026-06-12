@@ -33,6 +33,17 @@ Convert one SPC:
 build/spc2vgm song.spc --auto-playback -o converted/song.vgm
 ```
 
+Add `--wav` to also render the resulting calibrated VGM into the current
+working directory:
+
+```sh
+build/spc2vgm song.spc --auto-playback --wav -o converted/song.vgm
+```
+
+This writes `./song.wav`. The WAV is rendered from the exact VGM bytes written
+to disk. `--wav` accepts a single SPC and cannot be combined with batch or
+debug mode.
+
 Convert every SPC in a directory:
 
 ```sh
@@ -86,6 +97,25 @@ volumes, envelopes, noise, pitch modulation, and echo configuration.
 `spc_render` renders the original SPC to WAV using the bundled SNES SPC
 emulator. Its optional final argument solos one DSP voice from `0` through `7`,
 which makes it easier to compare individual voices with `spc2vgm --solo-voice`.
+
+The converter can export all eight original and converted voices in one step:
+
+```sh
+build/spc2vgm --debug song.spc
+```
+
+This single-SPC mode writes sixteen WAV files into `./debug/` in the current
+working directory:
+
+```text
+debug/song-spc-voice-0.wav
+debug/song-vgm-voice-0.wav
+...
+debug/song-spc-voice-7.wav
+debug/song-vgm-voice-7.wav
+```
+
+Use `--playback SECONDS` to limit the debug render duration.
 
 ## Current approximations
 
