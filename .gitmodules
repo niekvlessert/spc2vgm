@@ -1,0 +1,3 @@
+[submodule "external/smwcentral-spc-player"]
+	path = external/smwcentral-spc-player
+	url = https://github.com/telinc1/smwcentral-spc-player
