@@ -15,7 +15,9 @@
 #include <tuple>
 #include <vector>
 
+#define private public
 #include "SNES_SPC.h"
+#undef private
 #include "player/playera.hpp"
 #include "player/vgmplayer.hpp"
 #include "utils/MemoryLoader.h"
@@ -186,11 +188,17 @@ static std::vector<Write> trace_spc(const Bytes& data, double seconds) {
 	SNES_SPC spc; if (auto e = spc.init()) throw std::runtime_error(e);
 	if (auto e = spc.load_spc(data.data(), data.size())) throw std::runtime_error(e);
 	std::vector<SNES_SPC::sample_t> audio(2048);
+	std::array<int,8> env;
+	for(int v=0;v<8;++v)env[v]=spc.dsp.read(v*16+SPC_DSP::v_envx);
 	int pairs_left = int(seconds * SNES_SPC::sample_rate + .5);
 	while (pairs_left > 0) {
-		int pairs = std::min(pairs_left, 1024);
+		int pairs = std::min(pairs_left, 32);
 		if (auto e = spc.play(pairs * 2, audio.data())) throw std::runtime_error(e);
 		trace_clock_base += int64_t(pairs) * (SPC_CLOCK / SNES_SPC::sample_rate); pairs_left -= pairs;
+		for(int v=0;v<8;++v){
+			int value=spc.dsp.read(v*16+SPC_DSP::v_envx);
+			if(value!=env[v]){env[v]=value;writes.push_back({trace_clock_base,uint8_t(0x80+v),uint8_t(value)});}
+		}
 	}
 	trace_target = nullptr;
 	const int64_t final_clock = std::llround(seconds * SPC_CLOCK);
@@ -280,6 +288,7 @@ static std::optional<std::pair<double, double>> detect_loop(const std::vector<Wr
 	std::array<uint8_t, 128> regs{}; std::copy(dsp, dsp + 128, regs.begin());
 	std::vector<std::pair<int64_t, Signature>> notes;
 	for (auto e : events) {
+		if(e.reg>=0x80)continue;
 		regs[e.reg] = e.value; if (e.reg != 0x4c || !e.value) continue;
 		Signature s{}; for (int v = 0; v < 8; ++v) if (e.value & (1 << v))
 			s[v] = 0x80000000u | regs[v * 16 + 4] << 16 | regs[v * 16 + 2] | ((regs[v * 16 + 3] & 0x3f) << 8);
@@ -315,55 +324,54 @@ static std::pair<int,int> pitch(int p) {
 		if (fn >= 0 && fn <= 1023 && std::abs((fn + 1024) * scale - target) < error) { error = std::abs((fn + 1024) * scale - target); bo = o; bf = fn; } }
 	return {bf, bo & 15};
 }
-static std::pair<int,int> level_pan(const std::array<uint8_t,128>& r, int v, double gain, int minimum) {
+static std::pair<int,int> level_pan(const std::array<uint8_t,128>& r, int v, double gain, int minimum, int envx=-1) {
 	int b = v * 16; double l = std::abs(signed8(r[b]) * signed8(r[0x0c])) / 127.0, rr = std::abs(signed8(r[b+1]) * signed8(r[0x1c])) / 127.0;
-	double env = (!(r[b+5] & 0x80) && r[b+7] < 0x80) ? r[b+7] / 127.0 : 1.0, mx = std::max(l, rr), amp = mx / 127.0 * env;
+	double env = envx>=0 ? envx/127.0 : ((!(r[b+5] & 0x80) && r[b+7] < 0x80) ? r[b+7] / 127.0 : 1.0), mx = std::max(l, rr), amp = mx / 127.0 * env;
 	if (amp <= 0) return {127, 8}; int tl = std::clamp(int(std::lround((-20 * std::log10(std::min(1.0, amp)) - gain) / .375)), minimum, 126);
 	static const double p[16][2]={{1,1},{.70795,1},{.50119,1},{.35481,1},{.25119,1},{.17783,1},{.12589,1},{0,1},{0,0},{1,0},{1,.12589},{1,.17783},{1,.25119},{1,.35481},{1,.50119},{1,.70795}};
 	double tlr=l/mx,trr=rr/mx,best=1e9; int pan=0; for(int i=0;i<16;++i)if(i!=8){double e=(p[i][0]-tlr)*(p[i][0]-tlr)+(p[i][1]-trr)*(p[i][1]-trr);if(e<best){best=e;pan=i;}}
 	return {tl,pan};
 }
 static void wave_pitch(Bytes& o,int v,int wave,int p){auto [fn,oct]=pitch(p);reg(o,2,0x20+v,((wave>>8)&1)|((fn&127)<<1));reg(o,2,0x38+v,(oct<<4)|((fn>>7)&7));}
-static void level(Bytes& o,int v,const std::array<uint8_t,128>& r,double gain,int minimum,bool on){auto [tl,pan]=level_pan(r,v,gain,minimum);reg(o,2,0x50+v,(tl<<1)|1);reg(o,2,0x68+v,pan|(on?0x80:0));}
-static int snes_exponential_rate_to_opl4(int rate){
-	static const int periods[32]={0,2048,1536,1280,1024,768,640,512,384,320,256,192,160,128,96,80,64,48,40,32,24,20,16,12,10,8,6,5,4,3,2,1};
-	if(rate<=0)return 0;
-	const double snes_seconds_per_6db=177.0*periods[rate]/32000.0;
-	const int opl_rate=int(std::lround(std::log2(11.88861678/snes_seconds_per_6db)));
-	return std::clamp(opl_rate,1,14);
-}
-static void envelope(Bytes&o,int v,const std::array<uint8_t,128>&r){
-	int b=v*16,a=r[b+5],d=r[b+6],g=r[b+7],ar,dl,rr=15;
-	if(a&0x80){
-		double sustain=(double(((d>>5)&7)+1))/8.0;
-		int decay_level=std::clamp(int(std::lround(-20.0*std::log10(sustain)/3.0)),0,14);
-		const int snes_decay_rate=((a>>3)&0x0e)+0x10;
-		ar=((a&15)<<4)|snes_exponential_rate_to_opl4(snes_decay_rate);
-		dl=(decay_level<<4)|snes_exponential_rate_to_opl4(d&31);
-	}
-	else if(g<0x80){ar=0xf0;dl=0;}else{int rate=snes_exponential_rate_to_opl4(g&31);if((g>>5)==4||(g>>5)==5){ar=0xf0;dl=rate;}else{ar=rate<<4;dl=0;}}
-	reg(o,2,0x98+v,ar);reg(o,2,0xb0+v,dl);reg(o,2,0xc8+v,0xf0|rr);reg(o,2,0xe0+v,0);
-}
-static void key_on(Bytes&o,int v,int wave,const std::array<uint8_t,128>&r,double gain,int minimum){
-	int b=v*16,p=r[b+2]|((r[b+3]&0x3f)<<8);auto[fn,oct]=pitch(p);reg(o,2,0x20+v,((wave>>8)&1)|((fn&127)<<1));reg(o,2,0x38+v,(oct<<4)|((fn>>7)&7)|((r[0x4d]&(1<<v))?8:0));reg(o,2,8+v,wave);level(o,v,r,gain,minimum,false);reg(o,2,0x80+v,(r[0x2d]&(1<<v))?7:0);envelope(o,v,r);auto q=level_pan(r,v,gain,minimum);reg(o,2,0x68+v,q.second|0x80);
+static void level(Bytes& o,int v,const std::array<uint8_t,128>& r,double gain,int minimum,bool on,int envx=-1){auto [tl,pan]=level_pan(r,v,gain,minimum,envx);reg(o,2,0x50+v,(tl<<1)|1);reg(o,2,0x68+v,pan|(on?0x80:0));}
+static void key_on(Bytes&o,int slot,int source,int wave,const std::array<uint8_t,128>&r,double gain,int minimum,int envx){
+	int b=source*16,p=r[b+2]|((r[b+3]&0x3f)<<8);auto[fn,oct]=pitch(p);reg(o,2,0x20+slot,((wave>>8)&1)|((fn&127)<<1));reg(o,2,0x38+slot,(oct<<4)|((fn>>7)&7)|((r[0x4d]&(1<<source))?8:0));reg(o,2,8+slot,wave);auto q=level_pan(r,source,gain,minimum,envx);reg(o,2,0x50+slot,(q.first<<1)|1);reg(o,2,0x68+slot,q.second);reg(o,2,0x80+slot,(r[0x2d]&(1<<source))?7:0);reg(o,2,0x98+slot,0xf0);reg(o,2,0xb0+slot,0);reg(o,2,0xc8+slot,0xf0);reg(o,2,0xe0+slot,0);reg(o,2,0x68+slot,q.second|0x80);
 }
 
 struct Tail { Bytes bytes; int total; std::optional<size_t> loop_offset; int loop_sample; };
 static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const std::vector<Write>&events,double seconds,double gain,int minimum,int solo,std::optional<double> loop_start){
 	std::array<int,128> map;map.fill(-1);for(int i=0;i<int(samples.size());++i)for(int srcn:samples[i].srcn_aliases)map[srcn]=OPL4_RAM_WAVE_BASE+i;
-	std::array<uint8_t,128> r{};std::copy(dsp,dsp+128,r.begin());std::array<bool,8> active{};std::array<int,8> aw{};Bytes o;reg(o,1,5,2);reg(o,2,2,0x10);reg(o,2,0xf9,0);
+	std::array<uint8_t,128> r{};std::copy(dsp,dsp+128,r.begin());std::array<bool,8> active{};std::array<int,8> aw{},env{};Bytes o;reg(o,1,5,2);reg(o,2,2,0x10);reg(o,2,0xf9,0);
+	for(int v=0;v<8;++v)env[v]=dsp[v*16+8];
 	int noise=OPL4_RAM_WAVE_BASE+samples.size();auto wave_for=[&](int v){return(r[0x3d]&(1<<v))?noise:map[r[v*16+4]];};
-	for(int v=0;v<8;++v)if((solo<0||solo==v)&&(dsp[0x4c]&(1<<v))&&!(dsp[0x5c]&(1<<v))&&wave_for(v)>=0){aw[v]=wave_for(v);key_on(o,v,aw[v],r,gain,minimum);active[v]=true;}
+	for(int v=0;v<8;++v)if((solo<0||solo==v)&&(dsp[0x4c]&(1<<v))&&!(dsp[0x5c]&(1<<v))&&wave_for(v)>=0){aw[v]=wave_for(v);key_on(o,v,v,aw[v],r,gain,minimum,env[v]);active[v]=true;}
+	struct EchoHit{int64_t time;int slot,source,wave;double gain;std::array<uint8_t,128> regs;};
+	std::vector<EchoHit> echo_hits;std::array<uint8_t,128> er=r;
+	for(auto e:events){
+		if(e.reg>=0x80)continue;er[e.reg]=e.value;if(e.reg!=0x4c)continue;
+		for(int v=0;v<8;++v)if((e.value&(1<<v))&&(solo<0||solo==v)&&(er[0x4d]&(1<<v))){
+			int wave=(er[0x3d]&(1<<v))?noise:map[er[v*16+4]];
+			int sample=wave-OPL4_RAM_WAVE_BASE;if(sample<0||sample>=int(samples.size())||samples[sample].looped)continue;
+			int delay=std::max(1,er[0x7d]&15)*16*VGM_RATE/1000;double master=std::max(std::abs(signed8(er[0x0c])),std::abs(signed8(er[0x1c]))),echo=std::max(std::abs(signed8(er[0x2c])),std::abs(signed8(er[0x3c])));
+			if(master<=0||echo<=0)continue;double echo_gain=gain+20*std::log10(echo/master),feedback=std::abs(signed8(er[0x0d]))/128.0;
+			echo_hits.push_back({std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK)+delay,8+v,v,wave,echo_gain,er});
+			if(feedback>0)echo_hits.push_back({std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK)+2*delay,16+v,v,wave,echo_gain+20*std::log10(feedback),er});
+		}
+	}
+	std::sort(echo_hits.begin(),echo_hits.end(),[](const EchoHit&a,const EchoHit&b){return a.time<b.time;});size_t next_echo=0;
 	int64_t last=0,ls=loop_start?std::llround(*loop_start*VGM_RATE):0;std::optional<size_t> lo;
 	auto wait_to=[&](int64_t target){if(loop_start&&!lo&&last<=ls&&ls<=target){wait(o,ls-last);last=ls;lo=o.size();}if(target>last){wait(o,target-last);last=target;}};
-	for(auto e:events){int64_t t=std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK);wait_to(t);r[e.reg]=e.value;
-		if(e.reg==0x4c){for(int v=0;v<8;++v)if((e.value&(1<<v))&&(solo<0||solo==v)&&wave_for(v)>=0){aw[v]=wave_for(v);key_on(o,v,aw[v],r,gain,minimum);active[v]=true;}}
-		else if(e.reg==0x5c){for(int v=0;v<8;++v)if((e.value&(1<<v))&&(solo<0||solo==v)){reg(o,2,0x68+v,level_pan(r,v,gain,minimum).second);active[v]=false;}}
-		else if(e.reg==0x0c||e.reg==0x1c){for(int v=0;v<8;++v)if(active[v]&&(solo<0||solo==v))level(o,v,r,gain,minimum,true);}
+	auto flush_echo=[&](int64_t target){while(next_echo<echo_hits.size()&&echo_hits[next_echo].time<=target){auto&h=echo_hits[next_echo++];wait_to(h.time);key_on(o,h.slot,h.source,h.wave,h.regs,h.gain,minimum,127);}wait_to(target);};
+	for(auto e:events){int64_t t=std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK);flush_echo(t);
+		if(e.reg>=0x80){int v=e.reg-0x80;env[v]=e.value;if((solo<0||solo==v)&&active[v])level(o,v,r,gain,minimum,true,env[v]);continue;}
+		r[e.reg]=e.value;
+		if(e.reg==0x4c){for(int v=0;v<8;++v)if((e.value&(1<<v))&&(solo<0||solo==v)&&wave_for(v)>=0){env[v]=0;aw[v]=wave_for(v);key_on(o,v,v,aw[v],r,gain,minimum,env[v]);active[v]=true;}}
+		else if(e.reg==0x5c){}
+		else if(e.reg==0x0c||e.reg==0x1c){for(int v=0;v<8;++v)if(active[v]&&(solo<0||solo==v))level(o,v,r,gain,minimum,true,env[v]);}
 		else if(e.reg==0x2d||e.reg==0x3d||e.reg==0x4d){for(int v=0;v<8;++v)if(active[v]&&(solo<0||solo==v)){if(e.reg==0x2d)reg(o,2,0x80+v,(e.value&(1<<v))?7:0);else if(e.reg==0x4d){int b=v*16;auto[fn,oct]=pitch(r[b+2]|((r[b+3]&63)<<8));reg(o,2,0x38+v,(oct<<4)|((fn>>7)&7)|((e.value&(1<<v))?8:0));}else{int w=wave_for(v);if(w>=0&&w!=aw[v]){int b=v*16;wave_pitch(o,v,w,r[b+2]|((r[b+3]&63)<<8));reg(o,2,8+v,w);aw[v]=w;}}}}
-		else{int v=e.reg>>4,s=e.reg&15;if(v<8&&active[v]&&(solo<0||solo==v)){if(s==0||s==1||s==5||s==7)level(o,v,r,gain,minimum,true);if(s==5||s==6||s==7)envelope(o,v,r);else if(s==2||s==3){int b=v*16;wave_pitch(o,v,aw[v],r[b+2]|((r[b+3]&63)<<8));}}}
+		else{int v=e.reg>>4,s=e.reg&15;if(v<8&&active[v]&&(solo<0||solo==v)){if(s==0||s==1||s==5||s==7)level(o,v,r,gain,minimum,true,env[v]);if(s==2||s==3){int b=v*16;wave_pitch(o,v,aw[v],r[b+2]|((r[b+3]&63)<<8));}}}
 	}
-	int total=std::max<int64_t>(last,std::llround(seconds*VGM_RATE));wait_to(total);return{std::move(o),total,lo,int(ls)};
+	int total=std::max<int64_t>(last,std::llround(seconds*VGM_RATE));flush_echo(total);return{std::move(o),total,lo,int(ls)};
 }
 
 static Bytes build_vgm(const Bytes&ram,const Tail&t,double gain){
