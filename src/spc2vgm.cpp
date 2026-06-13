@@ -5,13 +5,16 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -53,12 +56,13 @@ struct AudioStats {
 struct Options {
 	fs::path input, output, manifest, batch, batch_output, manifest_output;
 	double playback = -1, fallback = 120, header_gain = 0, hardware_gain = 6;
-	int minimum_tl = 8, max_samples = 128, solo_voice = -1;
+	int minimum_tl = 8, max_samples = 128, solo_voice = -1, jobs = std::max(1u, std::thread::hardware_concurrency());
 	bool auto_playback = false, no_loop_detect = false, header_gain_set = false, debug = false, wav = false, prune_samples = false;
 };
 
-static std::vector<Write>* trace_target;
-static int64_t trace_clock_base;
+static thread_local std::vector<Write>* trace_target;
+static thread_local int64_t trace_clock_base;
+static std::mutex output_mutex;
 void spc_trace_dsp_write(int time, int reg, int value) {
 	if (trace_target && !(reg & 0x80))
 		trace_target->push_back({trace_clock_base + time, uint8_t(reg), uint8_t(value)});
@@ -557,16 +561,25 @@ static void render_vgm_wav(const Bytes& vgm, int frames, const fs::path& path)
 	player.Stop(); player.UnloadFile(); player.UnregisterAllPlayers(); MemoryLoader_Deinit(loader);
 }
 
-static double matched_header_gain(const Bytes& data, const Bytes& ram, const Tail& tail, double seconds, int solo)
+static double matched_header_gain(const Bytes& data, const Bytes& ram, const Tail& tail, double seconds, int solo, bool parallel)
 {
-	const AudioStats original = render_spc_stats(data, seconds, solo);
-	const AudioStats converted = render_vgm_stats(build_vgm(ram, tail, 0), tail.total);
+	const Bytes provisional = build_vgm(ram, tail, 0);
+	AudioStats original, converted;
+	if (parallel) {
+		auto original_future = std::async(std::launch::async, [&] { return render_spc_stats(data, seconds, solo); });
+		converted = render_vgm_stats(provisional, tail.total);
+		original = original_future.get();
+	} else {
+		original = render_spc_stats(data, seconds, solo);
+		converted = render_vgm_stats(provisional, tail.total);
+	}
 	if (original.rms() <= 0 || converted.rms() <= 0) return 0;
 	const double wanted_steps = std::log2(original.rms() / converted.rms()) * 32.0;
 	const double safe_steps = converted.peak > 0 ? std::log2(32767.0 / converted.peak) * 32.0 : wanted_steps;
 	const int gain_steps = std::clamp(int(std::lround(std::min(wanted_steps, safe_steps))), -64, 192);
 	const double gain = gain_steps * 6.0 / 32.0;
 	const AudioStats matched = render_vgm_stats(build_vgm(ram, tail, gain), tail.total);
+	std::lock_guard<std::mutex> lock(output_mutex);
 	std::cout << "volume match: SPC RMS " << original.rms() << ", VGM RMS " << matched.rms()
 		<< ", gain " << gain << " dB, error "
 		<< 20.0 * std::log10(matched.rms() / original.rms()) << " dB, clipped "
@@ -588,11 +601,14 @@ static void convert(const fs::path&in,const fs::path&out,const fs::path&csv,cons
 	if(opt.prune_samples)prune_unused_samples(samples,d.data()+SPC_DSP_OFFSET,events);auto ram=build_ram(samples);
 	Tail tail=playback(d.data()+SPC_DSP_OFFSET,samples,events,seconds,opt.hardware_gain,opt.minimum_tl,opt.solo_voice,loop);
 	double header_gain = opt.header_gain;
-	if (!opt.header_gain_set) header_gain = matched_header_gain(d, ram, tail, seconds, opt.solo_voice);
+	if (!opt.header_gain_set) header_gain = matched_header_gain(d, ram, tail, seconds, opt.solo_voice, opt.jobs > 1);
 	const Bytes vgm=build_vgm(ram,tail,header_gain);
 	write_file(out,vgm);if(!csv.empty())manifest(csv,samples);
-	std::cout<<"wrote "<<out<<" ("<<samples.size()<<" samples, "<<ram.size()<<" OPL4 RAM bytes, "<<seconds<<" seconds";
-	if(loop)std::cout<<", loop "<<*loop<<"s";std::cout<<")\n";
+	{
+		std::lock_guard<std::mutex> lock(output_mutex);
+		std::cout<<"wrote "<<out<<" ("<<samples.size()<<" samples, "<<ram.size()<<" OPL4 RAM bytes, "<<seconds<<" seconds";
+		if(loop)std::cout<<", loop "<<*loop<<"s";std::cout<<")\n";
+	}
 	if(opt.wav){
 		const fs::path wav=fs::current_path()/(in.stem().string()+".wav");
 		render_vgm_wav(vgm,tail.total,wav);
@@ -612,7 +628,7 @@ static void debug_export(const fs::path& input, const Options& opt)
 	events.erase(std::remove_if(events.begin(),events.end(),[=](const Write&w){return w.clock>end;}),events.end());
 	if(opt.prune_samples)prune_unused_samples(samples,data.data()+SPC_DSP_OFFSET,events);auto ram=build_ram(samples);
 	Tail complete=playback(data.data()+SPC_DSP_OFFSET,samples,events,seconds,opt.hardware_gain,opt.minimum_tl,-1,loop);
-	const double gain=opt.header_gain_set?opt.header_gain:matched_header_gain(data,ram,complete,seconds,-1);
+	const double gain=opt.header_gain_set?opt.header_gain:matched_header_gain(data,ram,complete,seconds,-1,opt.jobs>1);
 	const fs::path dir=fs::current_path()/"debug";const std::string stem=input.stem().string();
 	for(int voice=0;voice<8;++voice){
 		const fs::path original=dir/(stem+"-spc-voice-"+std::to_string(voice)+".wav");
@@ -625,10 +641,10 @@ static void debug_export(const fs::path& input, const Options& opt)
 		std::cout<<"wrote "<<original<<"\n"<<"wrote "<<converted<<"\n";
 	}
 }
-static void usage(const char*n){std::cerr<<"usage: "<<n<<" input.spc [-o output.vgm] [--wav] [--manifest file.csv] [--auto-playback] [--prune-samples]\n       "<<n<<" --debug input.spc [--playback SECONDS] [--prune-samples]\n       "<<n<<" --batch DIR [--batch-output DIR] [--manifest-output DIR] [--prune-samples]\n"; }
+static void usage(const char*n){std::cerr<<"usage: "<<n<<" input.spc [-o output.vgm] [--wav] [--manifest file.csv] [--auto-playback] [--prune-samples] [--jobs N]\n       "<<n<<" --debug input.spc [--playback SECONDS] [--prune-samples] [--jobs N]\n       "<<n<<" --batch DIR [--batch-output DIR] [--manifest-output DIR] [--prune-samples] [--jobs N]\n"; }
 static Options parse(int ac,char**av){
 	Options o;for(int i=1;i<ac;++i){std::string a=av[i];auto value=[&](){if(++i>=ac)throw std::runtime_error("missing value after "+a);return std::string(av[i]);};
-		if(a=="-o"||a=="--output")o.output=value();else if(a=="--manifest")o.manifest=value();else if(a=="--batch")o.batch=value();else if(a=="--batch-output")o.batch_output=value();else if(a=="--manifest-output")o.manifest_output=value();else if(a=="--playback")o.playback=std::stod(value());else if(a=="--fallback-seconds")o.fallback=std::stod(value());else if(a=="--playback-gain-db"){o.header_gain=std::stod(value());o.header_gain_set=true;}else if(a=="--hardware-gain-db")o.hardware_gain=std::stod(value());else if(a=="--minimum-tl")o.minimum_tl=std::stoi(value());else if(a=="--max-samples")o.max_samples=std::stoi(value());else if(a=="--solo-voice")o.solo_voice=std::stoi(value());else if(a=="--debug")o.debug=true;else if(a=="--wav")o.wav=true;else if(a=="--auto-playback")o.auto_playback=true;else if(a=="--no-loop-detect")o.no_loop_detect=true;else if(a=="--prune-samples")o.prune_samples=true;else if(a=="-h"||a=="--help"){usage(av[0]);std::exit(0);}else if(a[0]=='-')throw std::runtime_error("unknown option "+a);else o.input=a;
-	}return o;
+		if(a=="-o"||a=="--output")o.output=value();else if(a=="--manifest")o.manifest=value();else if(a=="--batch")o.batch=value();else if(a=="--batch-output")o.batch_output=value();else if(a=="--manifest-output")o.manifest_output=value();else if(a=="--playback")o.playback=std::stod(value());else if(a=="--fallback-seconds")o.fallback=std::stod(value());else if(a=="--playback-gain-db"){o.header_gain=std::stod(value());o.header_gain_set=true;}else if(a=="--hardware-gain-db")o.hardware_gain=std::stod(value());else if(a=="--minimum-tl")o.minimum_tl=std::stoi(value());else if(a=="--max-samples")o.max_samples=std::stoi(value());else if(a=="--solo-voice")o.solo_voice=std::stoi(value());else if(a=="--jobs")o.jobs=std::stoi(value());else if(a=="--debug")o.debug=true;else if(a=="--wav")o.wav=true;else if(a=="--auto-playback")o.auto_playback=true;else if(a=="--no-loop-detect")o.no_loop_detect=true;else if(a=="--prune-samples")o.prune_samples=true;else if(a=="-h"||a=="--help"){usage(av[0]);std::exit(0);}else if(a[0]=='-')throw std::runtime_error("unknown option "+a);else o.input=a;
+	}if(o.jobs<1)throw std::runtime_error("--jobs must be at least 1");return o;
 }
-int main(int ac,char**av){try{Options o=parse(ac,av);if(!o.batch.empty()){if(o.debug||o.wav)throw std::runtime_error("--debug and --wav only accept a single SPC");fs::path out=o.batch_output.empty()?o.batch/"vgm":o.batch_output;std::vector<fs::path> files;for(auto&e:fs::directory_iterator(o.batch))if(e.path().extension()==".spc")files.push_back(e.path());std::sort(files.begin(),files.end());for(auto&p:files){fs::path csv=o.manifest_output.empty()?fs::path{}:o.manifest_output/(p.stem().string()+".csv");convert(p,out/(p.stem().string()+".vgm"),csv,o);}return 0;}if(o.input.empty()){usage(av[0]);return 2;}if(o.debug){if(o.wav)throw std::runtime_error("--debug and --wav cannot be combined");debug_export(o.input,o);return 0;}if(o.output.empty()){o.output=o.input;o.output.replace_extension(".vgm");}convert(o.input,o.output,o.manifest,o);return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(int ac,char**av){try{Options o=parse(ac,av);if(!o.batch.empty()){if(o.debug||o.wav)throw std::runtime_error("--debug and --wav only accept a single SPC");fs::path out=o.batch_output.empty()?o.batch/"vgm":o.batch_output;std::vector<fs::path> files;for(auto&e:fs::directory_iterator(o.batch))if(e.path().extension()==".spc")files.push_back(e.path());std::sort(files.begin(),files.end());const int worker_count=std::min<int>(o.jobs,files.size());Options worker_options=o;if(worker_count>1)worker_options.jobs=1;size_t next=0;std::mutex work_mutex;std::exception_ptr failure;auto worker=[&]{for(;;){fs::path p;{std::lock_guard<std::mutex> lock(work_mutex);if(failure||next>=files.size())return;p=files[next++];}try{fs::path csv=o.manifest_output.empty()?fs::path{}:o.manifest_output/(p.stem().string()+".csv");convert(p,out/(p.stem().string()+".vgm"),csv,worker_options);}catch(...){std::lock_guard<std::mutex> lock(work_mutex);if(!failure)failure=std::current_exception();return;}}};std::vector<std::thread> workers;for(int i=0;i<worker_count;++i)workers.emplace_back(worker);for(auto&t:workers)t.join();if(failure)std::rethrow_exception(failure);return 0;}if(o.input.empty()){usage(av[0]);return 2;}if(o.debug){if(o.wav)throw std::runtime_error("--debug and --wav cannot be combined");debug_export(o.input,o);return 0;}if(o.output.empty()){o.output=o.input;o.output.replace_extension(".vgm");}convert(o.input,o.output,o.manifest,o);return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

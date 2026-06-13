@@ -50,6 +50,11 @@ Convert every SPC in a directory:
 build/spc2vgm --batch music --auto-playback
 ```
 
+Batch conversion uses all detected host CPU cores by default. Use `--jobs N`
+to set the maximum number of concurrent conversions, or `--jobs 1` for
+sequential conversion. For a single SPC, values above one also overlap the
+independent SPC and VGM volume-analysis renders.
+
 Without `--batch-output`, batch conversion writes into a `vgm` directory one
 level below the input directory:
 
@@ -76,6 +81,7 @@ Useful playback controls:
 --minimum-tl VALUE
 --solo-voice 0..7
 --prune-samples
+--jobs N
 ```
 
 `--auto-playback` uses SPC timing metadata and detected musical loops. Batch
@@ -86,6 +92,16 @@ receive a key-on during the exported playback interval. This can substantially
 reduce file size, especially for short tracks that share a large SPC instrument
 bank. It is opt-in because rebuilding the smaller bank can cause tiny OPL4
 rendering differences even when the removed instruments are never played.
+
+Run `vgm_cmp` over every top-level VGM in a directory and replace each original
+with its optimized version:
+
+```sh
+scripts/optimize_vgm_directory.sh music/vgm
+```
+
+The script finds `vgm_cmp` through `PATH`, `VGM_CMP`, or the adjacent
+`vgmtools/build/vgm_cmp` checkout. Existing `_optimized.vgm` files are skipped.
 
 ## Debugging tools
 
