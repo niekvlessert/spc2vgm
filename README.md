@@ -149,9 +149,3 @@ Use `--playback SECONDS` to limit the debug render duration.
 - SNES ADSR and GAIN rates are mapped to the closest OPL4 envelope settings.
 - The SNES DSP's exact live envelope position is not available to OPL4, so
   complex envelope transitions can still differ.
-
-`gg-03.spc` does not use echo, FIR, pitch modulation, or noise. Its main
-conversion challenge is envelope behavior plus frequent pitch and volume
-updates. It also uses several SRCN entries that alias the same BRR sample
-address. The converter maps all aliases to their shared OPL4 wave. Its exact
-ADSR progression remains an approximation.
