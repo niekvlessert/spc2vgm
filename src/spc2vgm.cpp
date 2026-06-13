@@ -54,7 +54,7 @@ struct Options {
 	fs::path input, output, manifest, batch, batch_output, manifest_output;
 	double playback = -1, fallback = 120, header_gain = 0, hardware_gain = 6;
 	int minimum_tl = 8, max_samples = 128, solo_voice = -1;
-	bool auto_playback = false, no_loop_detect = false, header_gain_set = false, debug = false, wav = false;
+	bool auto_playback = false, no_loop_detect = false, header_gain_set = false, debug = false, wav = false, prune_samples = false;
 };
 
 static std::vector<Write>* trace_target;
@@ -138,6 +138,26 @@ static std::vector<Sample> extract_samples(const uint8_t* ram, const uint8_t* ds
 		seen.insert(start); out.push_back(std::move(s));
 	}
 	return out;
+}
+
+static void prune_unused_samples(std::vector<Sample>& samples, const uint8_t* dsp, const std::vector<Write>& events) {
+	std::array<uint8_t, 128> registers{};
+	std::copy(dsp, dsp + registers.size(), registers.begin());
+	std::set<int> used;
+	auto remember_key_ons = [&](int mask) {
+		for (int voice = 0; voice < 8; ++voice)
+			if (mask & (1 << voice)) used.insert(registers[voice * 16 + 4]);
+	};
+	remember_key_ons(registers[0x4c] & ~registers[0x5c]);
+	for (const auto& event : events) {
+		if (event.reg >= 0x80) continue;
+		registers[event.reg] = event.value;
+		if (event.reg == 0x4c) remember_key_ons(event.value);
+	}
+	samples.erase(std::remove_if(samples.begin(), samples.end(), [&](const Sample& sample) {
+		return std::none_of(sample.srcn_aliases.begin(), sample.srcn_aliases.end(),
+			[&](int srcn) { return used.count(srcn); });
+	}), samples.end());
 }
 
 static void make_header(Bytes& ram, int wave, uint32_t start, int count, int loop) {
@@ -359,6 +379,62 @@ static void key_on(Bytes&o,int slot,int source,int wave,const std::array<uint8_t
 }
 
 struct Tail { Bytes bytes; int total; std::optional<size_t> loop_offset; int loop_sample; };
+static void append_optimized_wait(Bytes& out, int64_t samples) {
+	while (samples > 0) {
+		if (samples == 735) { out.push_back(0x62); return; }
+		if (samples == 882) { out.push_back(0x63); return; }
+		if (samples <= 32) {
+			int step = std::min<int64_t>(samples, 16);
+			out.push_back(uint8_t(0x70 + step - 1));
+			samples -= step;
+			continue;
+		}
+		int step = std::min<int64_t>(samples, 65535);
+		out.insert(out.end(), {0x61, uint8_t(step), uint8_t(step >> 8)});
+		samples -= step;
+	}
+}
+static Tail optimize_tail(Tail in) {
+	Tail out{{}, in.total, std::nullopt, in.loop_sample};
+	std::array<int, 0x300> registers; registers.fill(-1);
+	size_t pos = 0;
+	int64_t pending_wait = 0;
+	auto flush_wait = [&] { append_optimized_wait(out.bytes, pending_wait); pending_wait = 0; };
+	while (pos < in.bytes.size()) {
+		if (in.loop_offset && pos == *in.loop_offset) {
+			flush_wait();
+			out.loop_offset = out.bytes.size();
+			registers.fill(-1);
+		}
+		const uint8_t command = in.bytes[pos];
+		if (command == 0x61 && pos + 2 < in.bytes.size()) {
+			pending_wait += in.bytes[pos + 1] | (in.bytes[pos + 2] << 8);
+			pos += 3;
+			continue;
+		}
+		if (command == 0x62 || command == 0x63 || (command >= 0x70 && command <= 0x7f)) {
+			pending_wait += command == 0x62 ? 735 : command == 0x63 ? 882 : (command & 15) + 1;
+			++pos;
+			continue;
+		}
+		flush_wait();
+		if (command == 0xd0 && pos + 3 < in.bytes.size()) {
+			const int index = in.bytes[pos + 1] * 0x100 + in.bytes[pos + 2];
+			const int value = in.bytes[pos + 3];
+			if (registers[index] != value) {
+				out.bytes.insert(out.bytes.end(), in.bytes.begin() + pos, in.bytes.begin() + pos + 4);
+				registers[index] = value;
+			}
+			pos += 4;
+			continue;
+		}
+		out.bytes.push_back(command);
+		++pos;
+	}
+	flush_wait();
+	if (in.loop_offset && *in.loop_offset == in.bytes.size()) out.loop_offset = out.bytes.size();
+	return out;
+}
 static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const std::vector<Write>&events,double seconds,double gain,int minimum,int solo,std::optional<double> loop_start){
 	std::array<int,128> map;map.fill(-1);for(int i=0;i<int(samples.size());++i)for(int srcn:samples[i].srcn_aliases)map[srcn]=OPL4_RAM_WAVE_BASE+i;
 	std::array<uint8_t,128> r{};std::copy(dsp,dsp+128,r.begin());std::array<bool,8> active{};std::array<int,8> aw{},env{};Bytes o;reg(o,1,5,2);reg(o,2,2,0x10);reg(o,2,0xf9,0);
@@ -399,7 +475,7 @@ static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const 
 		else if(e.reg==0x2d||e.reg==0x3d||e.reg==0x4d){for(int v=0;v<8;++v)if(active[v]&&(solo<0||solo==v)){if(e.reg==0x2d)reg(o,2,0x80+v,(e.value&(1<<v))?7:0);else if(e.reg==0x4d){int b=v*16;auto[fn,oct]=pitch(r[b+2]|((r[b+3]&63)<<8));reg(o,2,0x38+v,(oct<<4)|((fn>>7)&7)|((e.value&(1<<v))?8:0));}else{int w=wave_for(v);if(w>=0&&w!=aw[v]){int b=v*16;wave_pitch(o,v,w,r[b+2]|((r[b+3]&63)<<8));reg(o,2,8+v,w);aw[v]=w;}}}}
 		else{int v=e.reg>>4,s=e.reg&15;if(v<8&&active[v]&&(solo<0||solo==v)){if(s==0||s==1||s==5||s==7)level(o,v,r,gain,minimum,true,env[v]);if(s==2||s==3){int b=v*16;wave_pitch(o,v,aw[v],r[b+2]|((r[b+3]&63)<<8));}}}
 	}
-	int total=std::max<int64_t>(last,std::llround(seconds*VGM_RATE));flush_echo(total);return{std::move(o),total,lo,int(ls)};
+	int total=std::max<int64_t>(last,std::llround(seconds*VGM_RATE));flush_echo(total);return optimize_tail({std::move(o),total,lo,int(ls)});
 }
 
 static Bytes build_vgm(const Bytes&ram,const Tail&t,double gain){
@@ -503,12 +579,13 @@ static void manifest(const fs::path&p,const std::vector<Sample>&s){
 }
 static void convert(const fs::path&in,const fs::path&out,const fs::path&csv,const Options&opt){
 	Bytes d=read_file(in);if(d.size()<SPC_DSP_OFFSET+SPC_DSP_SIZE||std::memcmp(d.data(),"SNES-SPC700 Sound File Data",25))throw std::runtime_error("invalid SPC: "+in.string());
-	auto samples=extract_samples(d.data()+SPC_RAM_OFFSET,d.data()+SPC_DSP_OFFSET,opt.max_samples);auto ram=build_ram(samples);Timing ti=timing(d,opt.fallback);double seconds=opt.playback>=0?opt.playback:ti.duration;auto events=trace_spc(d,seconds);auto loop=ti.loop_start;
+	auto samples=extract_samples(d.data()+SPC_RAM_OFFSET,d.data()+SPC_DSP_OFFSET,opt.max_samples);Timing ti=timing(d,opt.fallback);double seconds=opt.playback>=0?opt.playback:ti.duration;auto events=trace_spc(d,seconds);auto loop=ti.loop_start;
 	if(!loop&&!opt.no_loop_detect)if(auto found=detect_loop(events,d.data()+SPC_DSP_OFFSET)){loop=found->first;seconds=found->second;}
 	const int64_t playback_end = std::llround(seconds * SPC_CLOCK);
 	events.erase(std::remove_if(events.begin(), events.end(), [=](const Write& w) {
 		return w.clock > playback_end;
 	}), events.end());
+	if(opt.prune_samples)prune_unused_samples(samples,d.data()+SPC_DSP_OFFSET,events);auto ram=build_ram(samples);
 	Tail tail=playback(d.data()+SPC_DSP_OFFSET,samples,events,seconds,opt.hardware_gain,opt.minimum_tl,opt.solo_voice,loop);
 	double header_gain = opt.header_gain;
 	if (!opt.header_gain_set) header_gain = matched_header_gain(d, ram, tail, seconds, opt.solo_voice);
@@ -528,11 +605,12 @@ static void debug_export(const fs::path& input, const Options& opt)
 	if(data.size()<SPC_DSP_OFFSET+SPC_DSP_SIZE||std::memcmp(data.data(),"SNES-SPC700 Sound File Data",25))
 		throw std::runtime_error("invalid SPC: "+input.string());
 	auto samples=extract_samples(data.data()+SPC_RAM_OFFSET,data.data()+SPC_DSP_OFFSET,opt.max_samples);
-	auto ram=build_ram(samples);Timing ti=timing(data,opt.fallback);double seconds=opt.playback>=0?opt.playback:ti.duration;
+	Timing ti=timing(data,opt.fallback);double seconds=opt.playback>=0?opt.playback:ti.duration;
 	auto events=trace_spc(data,seconds);auto loop=ti.loop_start;
 	if(!loop&&!opt.no_loop_detect)if(auto found=detect_loop(events,data.data()+SPC_DSP_OFFSET)){loop=found->first;seconds=found->second;}
 	const int64_t end=std::llround(seconds*SPC_CLOCK);
 	events.erase(std::remove_if(events.begin(),events.end(),[=](const Write&w){return w.clock>end;}),events.end());
+	if(opt.prune_samples)prune_unused_samples(samples,data.data()+SPC_DSP_OFFSET,events);auto ram=build_ram(samples);
 	Tail complete=playback(data.data()+SPC_DSP_OFFSET,samples,events,seconds,opt.hardware_gain,opt.minimum_tl,-1,loop);
 	const double gain=opt.header_gain_set?opt.header_gain:matched_header_gain(data,ram,complete,seconds,-1);
 	const fs::path dir=fs::current_path()/"debug";const std::string stem=input.stem().string();
@@ -547,10 +625,10 @@ static void debug_export(const fs::path& input, const Options& opt)
 		std::cout<<"wrote "<<original<<"\n"<<"wrote "<<converted<<"\n";
 	}
 }
-static void usage(const char*n){std::cerr<<"usage: "<<n<<" input.spc [-o output.vgm] [--wav] [--manifest file.csv] [--auto-playback]\n       "<<n<<" --debug input.spc [--playback SECONDS]\n       "<<n<<" --batch DIR [--batch-output DIR] [--manifest-output DIR]\n"; }
+static void usage(const char*n){std::cerr<<"usage: "<<n<<" input.spc [-o output.vgm] [--wav] [--manifest file.csv] [--auto-playback] [--prune-samples]\n       "<<n<<" --debug input.spc [--playback SECONDS] [--prune-samples]\n       "<<n<<" --batch DIR [--batch-output DIR] [--manifest-output DIR] [--prune-samples]\n"; }
 static Options parse(int ac,char**av){
 	Options o;for(int i=1;i<ac;++i){std::string a=av[i];auto value=[&](){if(++i>=ac)throw std::runtime_error("missing value after "+a);return std::string(av[i]);};
-		if(a=="-o"||a=="--output")o.output=value();else if(a=="--manifest")o.manifest=value();else if(a=="--batch")o.batch=value();else if(a=="--batch-output")o.batch_output=value();else if(a=="--manifest-output")o.manifest_output=value();else if(a=="--playback")o.playback=std::stod(value());else if(a=="--fallback-seconds")o.fallback=std::stod(value());else if(a=="--playback-gain-db"){o.header_gain=std::stod(value());o.header_gain_set=true;}else if(a=="--hardware-gain-db")o.hardware_gain=std::stod(value());else if(a=="--minimum-tl")o.minimum_tl=std::stoi(value());else if(a=="--max-samples")o.max_samples=std::stoi(value());else if(a=="--solo-voice")o.solo_voice=std::stoi(value());else if(a=="--debug")o.debug=true;else if(a=="--wav")o.wav=true;else if(a=="--auto-playback")o.auto_playback=true;else if(a=="--no-loop-detect")o.no_loop_detect=true;else if(a=="-h"||a=="--help"){usage(av[0]);std::exit(0);}else if(a[0]=='-')throw std::runtime_error("unknown option "+a);else o.input=a;
+		if(a=="-o"||a=="--output")o.output=value();else if(a=="--manifest")o.manifest=value();else if(a=="--batch")o.batch=value();else if(a=="--batch-output")o.batch_output=value();else if(a=="--manifest-output")o.manifest_output=value();else if(a=="--playback")o.playback=std::stod(value());else if(a=="--fallback-seconds")o.fallback=std::stod(value());else if(a=="--playback-gain-db"){o.header_gain=std::stod(value());o.header_gain_set=true;}else if(a=="--hardware-gain-db")o.hardware_gain=std::stod(value());else if(a=="--minimum-tl")o.minimum_tl=std::stoi(value());else if(a=="--max-samples")o.max_samples=std::stoi(value());else if(a=="--solo-voice")o.solo_voice=std::stoi(value());else if(a=="--debug")o.debug=true;else if(a=="--wav")o.wav=true;else if(a=="--auto-playback")o.auto_playback=true;else if(a=="--no-loop-detect")o.no_loop_detect=true;else if(a=="--prune-samples")o.prune_samples=true;else if(a=="-h"||a=="--help"){usage(av[0]);std::exit(0);}else if(a[0]=='-')throw std::runtime_error("unknown option "+a);else o.input=a;
 	}return o;
 }
 int main(int ac,char**av){try{Options o=parse(ac,av);if(!o.batch.empty()){if(o.debug||o.wav)throw std::runtime_error("--debug and --wav only accept a single SPC");fs::path out=o.batch_output.empty()?o.batch/"vgm":o.batch_output;std::vector<fs::path> files;for(auto&e:fs::directory_iterator(o.batch))if(e.path().extension()==".spc")files.push_back(e.path());std::sort(files.begin(),files.end());for(auto&p:files){fs::path csv=o.manifest_output.empty()?fs::path{}:o.manifest_output/(p.stem().string()+".csv");convert(p,out/(p.stem().string()+".vgm"),csv,o);}return 0;}if(o.input.empty()){usage(av[0]);return 2;}if(o.debug){if(o.wav)throw std::runtime_error("--debug and --wav cannot be combined");debug_export(o.input,o);return 0;}if(o.output.empty()){o.output=o.input;o.output.replace_extension(".vgm");}convert(o.input,o.output,o.manifest,o);return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

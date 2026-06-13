@@ -75,10 +75,17 @@ Useful playback controls:
 --hardware-gain-db DB
 --minimum-tl VALUE
 --solo-voice 0..7
+--prune-samples
 ```
 
 `--auto-playback` uses SPC timing metadata and detected musical loops. Batch
 conversion enables the same timed playback behavior by default.
+
+`--prune-samples` reduces the embedded OPL4 sample bank to instruments that
+receive a key-on during the exported playback interval. This can substantially
+reduce file size, especially for short tracks that share a large SPC instrument
+bank. It is opt-in because rebuilding the smaller bank can cause tiny OPL4
+rendering differences even when the removed instruments are never played.
 
 ## Debugging tools
 
