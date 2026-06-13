@@ -72,7 +72,8 @@ at `384 * 12`.
 7. Build the OPL4 RAM image and upload ranges.
 8. Translate traced DSP state into timed OPL4 commands.
 9. Optimize redundant commands and waits.
-10. Render the original SPC and generated VGM to calculate header gain.
+10. Use audio statistics collected during tracing and render the generated VGM
+    to calculate header gain.
 11. Write the final VGM and optional manifest/WAV.
 
 ## SPC Tracing And Envelopes
@@ -182,6 +183,9 @@ Generated VGM version is 1.71. The stream contains:
 2. One full or several sparse `0x87` OPL4 RAM blocks.
 3. Timed OPL4 writes using VGM command `0xD0`.
 4. VGM end command `0x66`.
+5. A GD3 metadata block containing SPC ID666 title/game/artist metadata,
+   original system `Super Nintendo Entertainment System`, creator, and
+   conversion notes.
 
 The loop offset points into the music-command stream after all data blocks.
 
@@ -208,17 +212,22 @@ automatically lossless on real hardware.
 
 Unless `--playback-gain-db` is supplied:
 
-1. Render the original SPC for the exported duration.
+1. Collect original-SPC audio statistics during the required DSP trace pass.
 2. Render the generated VGM with zero header gain.
 3. Calculate the closest VGM header-gain step that matches stereo RMS without
    clipping.
-4. Render once more with the chosen gain and print the result.
+4. Calculate and print the expected matched RMS from that exact gain step.
 
 The header gain has approximately 0.188 dB resolution.
 
-For single-track conversions with `--jobs` greater than one, original-SPC and
-provisional-VGM analysis renders overlap. Batch mode runs independent tracks in
-parallel instead.
+The trace audio replaces a formerly separate SPC analysis render. A second VGM
+verification render is also unnecessary because the selected header gain is
+limited using the provisional render's peak. These optimizations do not alter
+the selected gain or generated VGM bytes. If loop detection shortens the
+exported duration after tracing, the converter still performs a separate SPC
+analysis render for the exact shortened duration.
+
+Batch mode runs independent tracks in parallel.
 
 ## Batch Concurrency
 

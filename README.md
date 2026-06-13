@@ -8,12 +8,11 @@ The conversion is approximate because OPL4 cannot reproduce every SNES DSP
 feature exactly, but the generated files use the original instrument samples
 and preserve song timing and detected loop points.
 
-Each conversion renders the original SPC and provisional VGM internally, then
-sets a per-track VGM gain so their full-track stereo RMS levels match. The
-converter prints the final rendered RMS error and clipping count. VGM header
-gain has approximately 0.188 dB resolution, so the result is the closest
-representable unclipped match. `--playback-gain-db DB` overrides automatic
-volume matching.
+Each conversion collects original-SPC audio statistics during tracing and
+renders a provisional VGM, then sets a per-track VGM gain so their full-track
+stereo RMS levels match. VGM header gain has approximately 0.188 dB
+resolution, so the result is the closest representable unclipped match.
+`--playback-gain-db DB` overrides automatic volume matching.
 
 ## Build
 
@@ -52,8 +51,7 @@ build/spc2vgm --batch music --auto-playback
 
 Batch conversion uses all detected host CPU cores by default. Use `--jobs N`
 to set the maximum number of concurrent conversions, or `--jobs 1` for
-sequential conversion. For a single SPC, values above one also overlap the
-independent SPC and VGM volume-analysis renders.
+sequential conversion.
 
 Without `--batch-output`, batch conversion writes into a `vgm` directory one
 level below the input directory:
@@ -65,6 +63,21 @@ music/vgm/song.vgm
 
 Output filenames always use the original SPC stem with a `.vgm` extension.
 Use `--batch-output DIR` to override the default `INPUT/vgm` directory.
+
+Generated VGMs contain a GD3 metadata block. Track title, game name, and music
+author are copied from the SPC's ID666 metadata when available; the title
+falls back to the SPC filename. The original system is identified as
+`Super Nintendo Entertainment System`, and notes record that the file was
+converted to YMF278B/OPL4 with `spc2vgm`.
+
+Set the GD3 creator field for single or batch conversion with:
+
+```sh
+build/spc2vgm song.spc --creator "Your Name"
+build/spc2vgm --batch music --creator "Your Name"
+```
+
+The default creator is `spc2vgm`.
 
 Manifests are not written by default. Use `--manifest FILE` for a single
 conversion or `--manifest-output DIR` for batch manifests. Batch manifest
@@ -104,6 +117,34 @@ scripts/optimize_vgm_directory.sh music/vgm
 
 The script finds `vgm_cmp` through `PATH`, `VGM_CMP`, or the adjacent
 `vgmtools/build/vgm_cmp` checkout. Existing `_optimized.vgm` files are skipped.
+
+Create a VGMRips-style ZIP package containing numbered VGZ files, an M3U
+playlist, a descriptive TXT file, and a PNG image:
+
+```sh
+scripts/package_vgmrips.py music/vgm
+scripts/package_vgmrips.py music/vgm --name "Game Name" --creator "Your Name"
+```
+
+Track titles are taken from VGM GD3 metadata when present. Otherwise, the
+script looks for matching SPC files in the VGM directory and its parent and
+uses their ID666 titles, then falls back to the original filename. Use
+`--spc-dir DIR` when the matching SPC files live elsewhere. The TXT song list
+includes track and loop lengths read directly from the VGM headers.
+
+The input directory must contain exactly one top-level PNG image. It is copied
+into the ZIP and renamed to match the package. The script reports that VGMRips
+will not accept the package and stops when the image is missing.
+
+Before building the package, the script runs `optimize_vgm_directory.sh` over
+the input directory. This applies any remaining lossless `vgm_cmp`
+optimizations in place. Files that have already been optimized are left
+unchanged. Packaging stops if `vgm_cmp` cannot be found or optimization fails.
+
+Package metadata can be supplied with `--game-name`, `--music-author`,
+`--developer`, `--publisher`, `--release-date`, `--system`, `--hardware`,
+`--version`, and `--notes`. Run `scripts/package_vgmrips.py --help` for all
+options.
 
 ## Debugging tools
 
