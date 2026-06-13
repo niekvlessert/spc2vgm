@@ -90,8 +90,10 @@ conversion enables the same timed playback behavior by default.
 `--prune-samples` reduces the embedded OPL4 sample bank to instruments that
 receive a key-on during the exported playback interval. This can substantially
 reduce file size, especially for short tracks that share a large SPC instrument
-bank. It is opt-in because rebuilding the smaller bank can cause tiny OPL4
-rendering differences even when the removed instruments are never played.
+bank. Used samples keep their original OPL4 wave numbers and RAM addresses;
+the VGM contains multiple sparse RAM data blocks that omit only unused ranges.
+This preserves the rendered audio while reducing both file size and MSX upload
+time.
 
 Run `vgm_cmp` over every top-level VGM in a directory and replace each original
 with its optimized version:

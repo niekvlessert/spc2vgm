@@ -39,12 +39,17 @@ constexpr int VGM_HEADER_SIZE = 0x100, SPC_CLOCK = 1024000, VGM_RATE = 44100;
 struct Write { int64_t clock; uint8_t reg, value; };
 struct Sample {
 	int index, start, loop, loop_sample;
-	bool looped;
+	bool looped, used = true;
 	Bytes brr;
 	std::vector<int16_t> pcm, continuation;
 	std::vector<int> srcn_aliases;
 };
 struct Timing { double duration; std::optional<double> loop_start; };
+struct RamImage {
+	Bytes bytes;
+	std::vector<std::pair<size_t, size_t>> ranges;
+	size_t upload_size = 0;
+};
 struct AudioStats {
 	long double square_sum = 0;
 	uint64_t samples = 0;
@@ -123,7 +128,7 @@ static std::vector<Sample> extract_samples(const uint8_t* ram, const uint8_t* ds
 			if (existing != out.end()) existing->srcn_aliases.push_back(index);
 			continue;
 		}
-		Sample s{index, start, loop, 0, false, {}, {}, {}, {index}};
+		Sample s{index, start, loop, 0, false, true, {}, {}, {}, {index}};
 		int pos = start, p1 = 0, p2 = 0;
 		while (pos + 9 <= int(SPC_RAM_SIZE)) {
 			if (pos == loop) s.loop_sample = s.pcm.size();
@@ -144,7 +149,7 @@ static std::vector<Sample> extract_samples(const uint8_t* ram, const uint8_t* ds
 	return out;
 }
 
-static void prune_unused_samples(std::vector<Sample>& samples, const uint8_t* dsp, const std::vector<Write>& events) {
+static bool mark_unused_samples(std::vector<Sample>& samples, const uint8_t* dsp, const std::vector<Write>& events) {
 	std::array<uint8_t, 128> registers{};
 	std::copy(dsp, dsp + registers.size(), registers.begin());
 	std::set<int> used;
@@ -158,10 +163,13 @@ static void prune_unused_samples(std::vector<Sample>& samples, const uint8_t* ds
 		registers[event.reg] = event.value;
 		if (event.reg == 0x4c) remember_key_ons(event.value);
 	}
-	samples.erase(std::remove_if(samples.begin(), samples.end(), [&](const Sample& sample) {
-		return std::none_of(sample.srcn_aliases.begin(), sample.srcn_aliases.end(),
+	for (auto& sample : samples) {
+		sample.used = std::any_of(sample.srcn_aliases.begin(), sample.srcn_aliases.end(),
 			[&](int srcn) { return used.count(srcn); });
-	}), samples.end());
+	}
+	return std::any_of(events.begin(), events.end(), [](const Write& event) {
+		return event.reg == 0x3d && event.value;
+	}) || dsp[0x3d];
 }
 
 static void make_header(Bytes& ram, int wave, uint32_t start, int count, int loop) {
@@ -173,8 +181,12 @@ static void make_header(Bytes& ram, int wave, uint32_t start, int count, int loo
 	h[7] = 0; h[8] = 0xf0; h[9] = 0; h[10] = 0x0f; h[11] = 0;
 }
 
-static Bytes build_ram(const std::vector<Sample>& samples) {
+static RamImage build_ram(const std::vector<Sample>& samples, bool sparse, bool noise_used = true) {
 	Bytes ram(OPL4_RAM_SIZE);
+	std::vector<bool> included(OPL4_RAM_SIZE);
+	auto add_range = [&](size_t start, size_t size) {
+		if (sparse) std::fill(included.begin() + start, included.begin() + start + size, true);
+	};
 	size_t normal = 0;
 	for (auto& s : samples) normal += (s.pcm.size() + (!s.looped)) * 2;
 	int64_t budget = OPL4_RAM_SIZE - OPL4_SAMPLE_BASE - normal - 8192 * 2;
@@ -197,14 +209,40 @@ static Bytes build_ram(const std::vector<Sample>& samples) {
 		if (pcm.size() > 0xffff) { pcm = s.pcm; loop = s.looped ? s.loop_sample : pcm.size(); if (!s.looped) pcm.push_back(0); }
 		if (pos + pcm.size() * 2 > ram.size()) throw std::runtime_error("decoded samples exceed OPL4 RAM");
 		make_header(ram, wave, OPL4_RAM_ADDRESS + pos, pcm.size(), loop);
+		if (s.used) add_range(wave * OPL4_HEADER_SIZE, OPL4_HEADER_SIZE);
+		const size_t sample_start = pos;
 		for (int16_t v : pcm) { ram[pos++] = uint16_t(v) >> 8; ram[pos++] = v; }
+		if (s.used) add_range(sample_start, pos - sample_start);
 	}
 	int noise_wave = samples.size(), lfsr = 1; make_header(ram, noise_wave, OPL4_RAM_ADDRESS + pos, 8192, 0);
+	if (noise_used) add_range(noise_wave * OPL4_HEADER_SIZE, OPL4_HEADER_SIZE);
+	const size_t noise_start = pos;
 	for (int i = 0; i < 8192; ++i) {
 		int feedback = (lfsr ^ (lfsr >> 1)) & 1; lfsr = (lfsr >> 1) | (feedback << 14);
 		int16_t v = lfsr & 1 ? 12000 : -12000; ram[pos++] = uint16_t(v) >> 8; ram[pos++] = v;
 	}
-	ram.resize(pos); return ram;
+	if (noise_used) add_range(noise_start, pos - noise_start);
+	ram.resize(pos);
+	std::vector<std::pair<size_t, size_t>> ranges;
+	if (!sparse) ranges.emplace_back(0, ram.size());
+	else for (size_t start = 0; start < ram.size();) {
+		while (start < ram.size() && !included[start]) ++start;
+		if (start == ram.size()) break;
+		size_t end = start;
+		while (end < ram.size() && included[end]) ++end;
+		while (end < ram.size()) {
+			size_t next = end;
+			while (next < ram.size() && !included[next]) ++next;
+			if (next - end > 15) break;
+			end = next;
+			while (end < ram.size() && included[end]) ++end;
+		}
+		ranges.emplace_back(start, end);
+		start = end;
+	}
+	size_t upload_size = 0;
+	for (auto [start, end] : ranges) upload_size += end - start;
+	return {std::move(ram), std::move(ranges), upload_size};
 }
 
 static std::vector<Write> trace_spc(const Bytes& data, double seconds) {
@@ -482,9 +520,9 @@ static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const 
 	int total=std::max<int64_t>(last,std::llround(seconds*VGM_RATE));flush_echo(total);return optimize_tail({std::move(o),total,lo,int(ls)});
 }
 
-static Bytes build_vgm(const Bytes&ram,const Tail&t,double gain){
+static Bytes build_vgm(const RamImage&ram,const Tail&t,double gain){
 	Bytes cmd={0x67,0x66,0x84};append32(cmd,8);append32(cmd,OPL4_ROM_SIZE);append32(cmd,0);
-	cmd.insert(cmd.end(),{0x67,0x66,0x87});append32(cmd,8+ram.size());append32(cmd,OPL4_RAM_SIZE);append32(cmd,0);cmd.insert(cmd.end(),ram.begin(),ram.end());size_t tail=cmd.size();cmd.insert(cmd.end(),t.bytes.begin(),t.bytes.end());cmd.push_back(0x66);
+	for(auto [start,end]:ram.ranges){cmd.insert(cmd.end(),{0x67,0x66,0x87});append32(cmd,8+end-start);append32(cmd,OPL4_RAM_SIZE);append32(cmd,start);cmd.insert(cmd.end(),ram.bytes.begin()+start,ram.bytes.begin()+end);}size_t tail=cmd.size();cmd.insert(cmd.end(),t.bytes.begin(),t.bytes.end());cmd.push_back(0x66);
 	Bytes v(VGM_HEADER_SIZE);std::copy_n("Vgm ",4,v.begin());put32(v,8,0x171);put32(v,0x18,t.total);put32(v,0x24,60);put32(v,0x34,VGM_HEADER_SIZE-0x34);put32(v,0x60,OPL4_CLOCK);v[0x7c]=uint8_t(std::clamp(int(std::lround(gain*32/6)), -64,192));
 	if(t.loop_offset){uint32_t absolute=VGM_HEADER_SIZE+tail+*t.loop_offset;put32(v,0x1c,absolute-0x1c);put32(v,0x20,t.total-t.loop_sample);}
 	v.insert(v.end(),cmd.begin(),cmd.end());put32(v,4,v.size()-4);return v;
@@ -561,7 +599,7 @@ static void render_vgm_wav(const Bytes& vgm, int frames, const fs::path& path)
 	player.Stop(); player.UnloadFile(); player.UnregisterAllPlayers(); MemoryLoader_Deinit(loader);
 }
 
-static double matched_header_gain(const Bytes& data, const Bytes& ram, const Tail& tail, double seconds, int solo, bool parallel)
+static double matched_header_gain(const Bytes& data, const RamImage& ram, const Tail& tail, double seconds, int solo, bool parallel)
 {
 	const Bytes provisional = build_vgm(ram, tail, 0);
 	AudioStats original, converted;
@@ -588,7 +626,7 @@ static double matched_header_gain(const Bytes& data, const Bytes& ram, const Tai
 }
 static void manifest(const fs::path&p,const std::vector<Sample>&s){
 	fs::create_directories(p.parent_path());std::ofstream o(p);o<<"wave,srcn,srcn_aliases,start_hex,loop_hex,brr_bytes,pcm_samples,loop_sample,looped\n";
-	for(int i=0;i<int(s.size());++i){o<<i<<','<<s[i].index<<',';for(size_t a=0;a<s[i].srcn_aliases.size();++a){if(a)o<<'|';o<<s[i].srcn_aliases[a];}o<<",0x"<<std::hex<<std::uppercase<<std::setw(4)<<std::setfill('0')<<s[i].start<<",0x"<<std::setw(4)<<s[i].loop<<std::dec<<','<<s[i].brr.size()<<','<<s[i].pcm.size()<<','<<s[i].loop_sample<<','<<s[i].looped<<'\n';}
+	for(int i=0;i<int(s.size());++i)if(s[i].used){o<<i<<','<<s[i].index<<',';for(size_t a=0;a<s[i].srcn_aliases.size();++a){if(a)o<<'|';o<<s[i].srcn_aliases[a];}o<<",0x"<<std::hex<<std::uppercase<<std::setw(4)<<std::setfill('0')<<s[i].start<<",0x"<<std::setw(4)<<s[i].loop<<std::dec<<','<<s[i].brr.size()<<','<<s[i].pcm.size()<<','<<s[i].loop_sample<<','<<s[i].looped<<'\n';}
 }
 static void convert(const fs::path&in,const fs::path&out,const fs::path&csv,const Options&opt){
 	Bytes d=read_file(in);if(d.size()<SPC_DSP_OFFSET+SPC_DSP_SIZE||std::memcmp(d.data(),"SNES-SPC700 Sound File Data",25))throw std::runtime_error("invalid SPC: "+in.string());
@@ -598,7 +636,7 @@ static void convert(const fs::path&in,const fs::path&out,const fs::path&csv,cons
 	events.erase(std::remove_if(events.begin(), events.end(), [=](const Write& w) {
 		return w.clock > playback_end;
 	}), events.end());
-	if(opt.prune_samples)prune_unused_samples(samples,d.data()+SPC_DSP_OFFSET,events);auto ram=build_ram(samples);
+	bool noise_used=true;if(opt.prune_samples)noise_used=mark_unused_samples(samples,d.data()+SPC_DSP_OFFSET,events);auto ram=build_ram(samples,opt.prune_samples,noise_used);
 	Tail tail=playback(d.data()+SPC_DSP_OFFSET,samples,events,seconds,opt.hardware_gain,opt.minimum_tl,opt.solo_voice,loop);
 	double header_gain = opt.header_gain;
 	if (!opt.header_gain_set) header_gain = matched_header_gain(d, ram, tail, seconds, opt.solo_voice, opt.jobs > 1);
@@ -606,7 +644,7 @@ static void convert(const fs::path&in,const fs::path&out,const fs::path&csv,cons
 	write_file(out,vgm);if(!csv.empty())manifest(csv,samples);
 	{
 		std::lock_guard<std::mutex> lock(output_mutex);
-		std::cout<<"wrote "<<out<<" ("<<samples.size()<<" samples, "<<ram.size()<<" OPL4 RAM bytes, "<<seconds<<" seconds";
+		std::cout<<"wrote "<<out<<" ("<<std::count_if(samples.begin(),samples.end(),[](const Sample&s){return s.used;})<<" samples, "<<ram.upload_size<<" OPL4 RAM bytes, "<<seconds<<" seconds";
 		if(loop)std::cout<<", loop "<<*loop<<"s";std::cout<<")\n";
 	}
 	if(opt.wav){
@@ -626,7 +664,7 @@ static void debug_export(const fs::path& input, const Options& opt)
 	if(!loop&&!opt.no_loop_detect)if(auto found=detect_loop(events,data.data()+SPC_DSP_OFFSET)){loop=found->first;seconds=found->second;}
 	const int64_t end=std::llround(seconds*SPC_CLOCK);
 	events.erase(std::remove_if(events.begin(),events.end(),[=](const Write&w){return w.clock>end;}),events.end());
-	if(opt.prune_samples)prune_unused_samples(samples,data.data()+SPC_DSP_OFFSET,events);auto ram=build_ram(samples);
+	bool noise_used=true;if(opt.prune_samples)noise_used=mark_unused_samples(samples,data.data()+SPC_DSP_OFFSET,events);auto ram=build_ram(samples,opt.prune_samples,noise_used);
 	Tail complete=playback(data.data()+SPC_DSP_OFFSET,samples,events,seconds,opt.hardware_gain,opt.minimum_tl,-1,loop);
 	const double gain=opt.header_gain_set?opt.header_gain:matched_header_gain(data,ram,complete,seconds,-1,opt.jobs>1);
 	const fs::path dir=fs::current_path()/"debug";const std::string stem=input.stem().string();
