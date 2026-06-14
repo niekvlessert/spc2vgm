@@ -63,8 +63,10 @@ jobs:
           executable_suffix=""
           if [[ "${{ runner.os }}" == "Windows" ]]; then executable_suffix=".exe"; fi
           "$package/bin/spc2vgm$executable_suffix" --help
-          "$package/bin/vgm_cmp$executable_suffix" 2>&1 | grep -q "VGM Compressor"
-          "$package/bin/unarr_extract$executable_suffix" 2>&1 | grep -q "Usage:"
+          vgm_cmp_output=$("$package/bin/vgm_cmp$executable_suffix" 2>&1 || true)
+          grep -q "VGM Compressor" <<< "$vgm_cmp_output"
+          unarr_output=$("$package/bin/unarr_extract$executable_suffix" 2>&1 || true)
+          grep -q "Usage:" <<< "$unarr_output"
           python "$package/scripts/package_vgmrips.py" --help
           python "$package/scripts/fetch_snesmusic.py" --help
           test -f "$package/scripts/package_vgmrips.cmd"
