@@ -4,3 +4,6 @@
 [submodule "external/libvgm"]
 	path = external/libvgm
 	url = https://github.com/ValleyBell/libvgm.git
+[submodule "external/vgmtools"]
+	path = external/vgmtools
+	url = https://github.com/vgmrips/vgmtools.git

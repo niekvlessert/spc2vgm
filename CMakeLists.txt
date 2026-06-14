@@ -1,11 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(spc2vgm VERSION 0.1.0 LANGUAGES CXX)
+project(spc2vgm VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_NO_PACKAGE_REGISTRY ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(ZLIB REQUIRED)
 
 set(BUILD_LIBAUDIO OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -50,4 +52,25 @@ target_link_libraries(spc_trace PRIVATE snes_spc)
 add_executable(spc_render tools/spc_render.cpp)
 target_link_libraries(spc_render PRIVATE snes_spc)
 
-install(TARGETS spc2vgm spc_trace spc_render RUNTIME DESTINATION bin)
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/vgmtools/vgm_cmp.c")
+    message(FATAL_ERROR
+        "Missing vgmtools submodule. Run: git submodule update --init --recursive")
+endif()
+
+add_executable(vgm_cmp
+    external/vgmtools/vgm_cmp.c
+    external/vgmtools/chip_cmp.c
+)
+target_link_libraries(vgm_cmp PRIVATE ZLIB::ZLIB)
+if(MSVC)
+    target_compile_definitions(vgm_cmp PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
+install(TARGETS spc2vgm spc_trace spc_render vgm_cmp RUNTIME DESTINATION bin)
+install(PROGRAMS
+    scripts/optimize_vgm_directory.sh
+    scripts/package_vgmrips.py
+    DESTINATION scripts
+)
+install(FILES README.md INFO_FOR_AI_AND_DEV.md THIRD_PARTY_NOTICES.md DESTINATION .)
+install(FILES external/vgmtools/LICENSE DESTINATION licenses RENAME vgmtools-GPL-2.0.txt)

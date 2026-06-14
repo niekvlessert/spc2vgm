@@ -22,7 +22,19 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-The executable is written to `build/spc2vgm`.
+The build creates `spc2vgm`, `spc_trace`, `spc_render`, and a bundled
+`vgm_cmp` executable in `build/`.
+
+Install a complete package tree containing the executables, scripts,
+documentation, and third-party notices:
+
+```sh
+cmake --install build --prefix package/spc2vgm
+```
+
+GitHub Actions builds downloadable ZIP packages for macOS Intel, macOS Apple
+silicon, Windows Intel, Linux Intel, and Linux ARM. Tagged builds also attach
+all five packages to the GitHub release.
 
 ## Usage
 
@@ -115,8 +127,9 @@ with its optimized version:
 scripts/optimize_vgm_directory.sh music/vgm
 ```
 
-The script finds `vgm_cmp` through `PATH`, `VGM_CMP`, or the adjacent
-`vgmtools/build/vgm_cmp` checkout. Existing `_optimized.vgm` files are skipped.
+The script prefers the bundled `vgm_cmp` from the installed package or local
+build, then checks `PATH`, `VGM_CMP`, and the adjacent `vgmtools` checkout.
+Existing `_optimized.vgm` files are skipped.
 
 Create a VGMRips-style ZIP package containing numbered VGZ files, an M3U
 playlist, a descriptive TXT file, and a PNG image:
@@ -136,10 +149,11 @@ The input directory must contain exactly one top-level PNG image. It is copied
 into the ZIP and renamed to match the package. The script reports that VGMRips
 will not accept the package and stops when the image is missing.
 
-Before building the package, the script runs `optimize_vgm_directory.sh` over
-the input directory. This applies any remaining lossless `vgm_cmp`
+Before building the package, the script optimizes the input directory's VGM
+files using the bundled `vgm_cmp`. This applies any remaining lossless
 optimizations in place. Files that have already been optimized are left
-unchanged. Packaging stops if `vgm_cmp` cannot be found or optimization fails.
+unchanged. The standalone `optimize_vgm_directory.sh` provides the same
+behavior for Bash users. Packaging stops if optimization fails.
 
 Package metadata can be supplied with `--game-name`, `--music-author`,
 `--developer`, `--publisher`, `--release-date`, `--system`, `--hardware`,

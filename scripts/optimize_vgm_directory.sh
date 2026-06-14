@@ -15,12 +15,20 @@ fi
 script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if [[ -n ${VGM_CMP:-} ]]; then
 	vgm_cmp=$VGM_CMP
+elif [[ -x "$script_directory/../bin/vgm_cmp" ]]; then
+	vgm_cmp="$script_directory/../bin/vgm_cmp"
+elif [[ -x "$script_directory/../bin/vgm_cmp.exe" ]]; then
+	vgm_cmp="$script_directory/../bin/vgm_cmp.exe"
+elif [[ -x "$script_directory/../build/vgm_cmp" ]]; then
+	vgm_cmp="$script_directory/../build/vgm_cmp"
+elif [[ -x "$script_directory/../build/vgm_cmp.exe" ]]; then
+	vgm_cmp="$script_directory/../build/vgm_cmp.exe"
 elif command -v vgm_cmp >/dev/null 2>&1; then
 	vgm_cmp=$(command -v vgm_cmp)
 elif [[ -x "$script_directory/../../vgmtools/build/vgm_cmp" ]]; then
 	vgm_cmp="$script_directory/../../vgmtools/build/vgm_cmp"
 else
-	printf 'Unable to find vgm_cmp. Add it to PATH or set VGM_CMP.\n' >&2
+	printf 'Unable to find bundled vgm_cmp. Rebuild spc2vgm or set VGM_CMP.\n' >&2
 	exit 1
 fi
 

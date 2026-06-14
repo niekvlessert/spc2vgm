@@ -135,6 +135,49 @@ def most_common(values: list[str], fallback: str) -> str:
     return Counter(values).most_common(1)[0][0] if values else fallback
 
 
+def find_vgm_cmp() -> Path:
+    script_directory = Path(__file__).resolve().parent
+    candidates = []
+    if os.environ.get("VGM_CMP"):
+        candidates.append(Path(os.environ["VGM_CMP"]))
+    for name in ("vgm_cmp", "vgm_cmp.exe"):
+        candidates += [
+            script_directory.parent / "bin" / name,
+            script_directory.parent / "build" / name,
+            script_directory.parent.parent / "vgmtools" / "build" / name,
+        ]
+        found = shutil.which(name)
+        if found:
+            candidates.append(Path(found))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise SystemExit("Unable to find bundled vgm_cmp. Rebuild spc2vgm or set VGM_CMP.")
+
+
+def optimize_vgm_directory(directory: Path) -> None:
+    vgm_cmp = find_vgm_cmp()
+    optimized = 0
+    unchanged = 0
+    print(f"Checking VGM optimization in {directory}...", flush=True)
+    for source in sorted(directory.glob("*.vgm"), key=natural_key):
+        if source.stem.casefold().endswith("_optimized"):
+            continue
+        temporary = source.with_name(f"{source.name}.vgm_cmp_tmp.{os.getpid()}")
+        temporary.unlink(missing_ok=True)
+        print(f"Optimizing {source}", flush=True)
+        result = subprocess.run([str(vgm_cmp), str(source), str(temporary)])
+        if result.returncode:
+            temporary.unlink(missing_ok=True)
+            raise SystemExit(f"vgm_cmp failed for {source} with exit code {result.returncode}")
+        if temporary.is_file():
+            temporary.replace(source)
+            optimized += 1
+        else:
+            unchanged += 1
+    print(f"Done: {optimized} optimized, {unchanged} already optimal.")
+
+
 def duration(samples: int) -> str:
     seconds = int(round(samples / VGM_RATE))
     hours, seconds = divmod(seconds, 3600)
@@ -231,14 +274,7 @@ def main() -> int:
         names = ", ".join(sorted(path.name for path in images))
         raise SystemExit(f"Multiple PNG images found in {source_dir}; keep exactly one: {names}")
     image = images[0]
-    optimizer = Path(__file__).resolve().with_name("optimize_vgm_directory.sh")
-    if not optimizer.is_file():
-        raise SystemExit(f"Unable to find VGM optimizer script: {optimizer}")
-    print(f"Checking VGM optimization in {source_dir}...", flush=True)
-    try:
-        subprocess.run([str(optimizer), str(source_dir)], check=True)
-    except subprocess.CalledProcessError as error:
-        raise SystemExit(f"VGM optimization failed with exit code {error.returncode}") from error
+    optimize_vgm_directory(source_dir)
     candidates = [path for path in source_dir.iterdir() if path.suffix.casefold() in (".vgm", ".vgz")]
     regular_stems = {
         path.stem.casefold()
@@ -295,9 +331,11 @@ def main() -> int:
         for track in tracks:
             (stage / track.output_name).write_bytes(gzip.compress(track.data, compresslevel=9, mtime=0))
         playlist = "\r\n".join(track.output_name for track in tracks) + "\r\n"
-        (stage / f"{package_name}.m3u").write_text(playlist, encoding="utf-8", newline="")
+        with (stage / f"{package_name}.m3u").open("w", encoding="utf-8", newline="") as output_file:
+            output_file.write(playlist)
         description = make_description(args, tracks, package_name)
-        (stage / f"{package_name}.txt").write_text(description, encoding="utf-8", newline="")
+        with (stage / f"{package_name}.txt").open("w", encoding="utf-8", newline="") as output_file:
+            output_file.write(description)
         shutil.copyfile(image, stage / f"{package_name}.png")
         temporary_zip = stage / "package.zip"
         with zipfile.ZipFile(temporary_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:

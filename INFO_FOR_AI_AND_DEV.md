@@ -34,12 +34,15 @@ Important dependencies:
 
 - `external/smwcentral-spc-player`: SPC execution, DSP emulation, and rendering.
 - `external/libvgm`: VGM rendering used for calibration and WAV/debug output.
+- `external/vgmtools`: source for the separately built bundled `vgm_cmp`
+  executable.
 
 Built tools:
 
 - `build/spc2vgm`: converter.
 - `build/spc_trace`: raw SPC DSP-write tracer.
 - `build/spc_render`: original-SPC WAV renderer with optional voice solo.
+- `build/vgm_cmp`: bundled lossless VGM compressor used by packaging scripts.
 
 ## Important Constants
 
