@@ -216,22 +216,34 @@ The converter can export all eight original and converted voices in one step:
 build/spc2vgm --debug song.spc
 ```
 
-This single-SPC mode writes sixteen WAV files into `./debug/` in the current
-working directory:
+This single-SPC mode writes comparison and routing-isolation WAV files into
+`./debug/` in the current working directory:
 
 ```text
 debug/song-spc-voice-0.wav
 debug/song-vgm-voice-0.wav
+debug/song-vgm-voice-0-direct.wav
+debug/song-vgm-voice-0-echo.wav
 ...
 debug/song-spc-voice-7.wav
 debug/song-vgm-voice-7.wav
+debug/song-vgm-voice-7-direct.wav
+debug/song-vgm-voice-7-echo.wav
 ```
+
+Each `vgm-voice-N.wav` contains the direct OPL4 voice plus any synthetic echo
+slots sourced from that voice, matching its contribution to the complete VGM.
+The `-direct.wav` and `-echo.wav` files isolate those two parts. Echo-only files
+are silent when that source voice receives no synthetic OPL4 echo.
 
 Use `--playback SECONDS` to limit the debug render duration.
 
 ## Current approximations
 
 - SNES echo and FIR filtering cannot be reproduced exactly by OPL4.
+- Echoed looped samples are bounded by their following key-off or replacement
+  key-on and use one attenuated delayed copy, so the spare OPL4 echo slots do
+  not ring indefinitely or repeatedly retrigger sustained instruments.
 - Pitch modulation and noise are approximated when a track uses them.
 - SNES ADSR and GAIN rates are mapped to the closest OPL4 envelope settings.
 - The SNES DSP's exact live envelope position is not available to OPL4, so

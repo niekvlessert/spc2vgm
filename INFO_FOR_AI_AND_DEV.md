@@ -169,11 +169,16 @@ SNES echo/FIR cannot be reproduced exactly by OPL4.
 
 Current echo approximation:
 
-- Applies to key-ons for non-looped samples whose voice is enabled in `EON`.
+- Applies to key-ons whose voice is enabled in `EON`. Looped samples are
+  supported when a following `KOFF` or replacement `KON` bounds the echo note.
+- A looped sample gets one attenuated delayed copy rather than repeated
+  retriggers, avoiding machine-gun artifacts and indefinitely overlapping taps.
 - Schedules repeated delayed key-ons on spare OPL4 slots.
 - Uses `EDL`, echo volume, master volume, and feedback to approximate timing and
   decay.
 - Alternates between two spare slots per source voice.
+- Debug `vgm-voice-N.wav` renders include the direct slot and both extra echo
+  slots owned by source voice N. `-direct.wav` and `-echo.wav` isolate them.
 
 Other limitations:
 

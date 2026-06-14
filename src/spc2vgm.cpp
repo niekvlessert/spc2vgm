@@ -539,33 +539,37 @@ static Tail optimize_tail(Tail in) {
 	if (in.loop_offset && *in.loop_offset == in.bytes.size()) out.loop_offset = out.bytes.size();
 	return out;
 }
-static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const std::vector<Write>&events,double seconds,double gain,int minimum,int solo,std::optional<double> loop_start){
+static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const std::vector<Write>&events,double seconds,double gain,int minimum,int solo,std::optional<double> loop_start,bool include_direct=true,bool include_echo=true){
 	std::array<int,128> map;map.fill(-1);for(int i=0;i<int(samples.size());++i)for(int srcn:samples[i].srcn_aliases)map[srcn]=OPL4_RAM_WAVE_BASE+i;
 	std::array<uint8_t,128> r{};std::copy(dsp,dsp+128,r.begin());std::array<bool,8> active{};std::array<int,8> aw{},env{};Bytes o;reg(o,1,5,2);reg(o,2,2,0x10);reg(o,2,0xf9,0);
 	for(int v=0;v<8;++v)env[v]=dsp[v*16+8];
 	int noise=OPL4_RAM_WAVE_BASE+samples.size();auto wave_for=[&](int v){return(r[0x3d]&(1<<v))?noise:map[r[v*16+4]];};
-	for(int v=0;v<8;++v)if((solo<0||solo==v)&&(dsp[0x4c]&(1<<v))&&!(dsp[0x5c]&(1<<v))&&wave_for(v)>=0){aw[v]=wave_for(v);key_on(o,v,v,aw[v],r,gain,minimum,env[v]);active[v]=true;}
-	struct EchoHit{int64_t time;int slot,source,wave;double gain;std::array<uint8_t,128> regs;};
+	for(int v=0;v<8;++v)if(include_direct&&(solo<0||solo==v)&&(dsp[0x4c]&(1<<v))&&!(dsp[0x5c]&(1<<v))&&wave_for(v)>=0){aw[v]=wave_for(v);key_on(o,v,v,aw[v],r,gain,minimum,env[v]);active[v]=true;}
+	struct EchoHit{int64_t time;int slot,source,wave,note;double gain;bool on;std::array<uint8_t,128> regs;};
 	std::vector<EchoHit> echo_hits;std::array<uint8_t,128> er=r;
-	for(auto e:events){
+	int echo_note=0;
+	for(size_t ei=0;ei<events.size();++ei){auto e=events[ei];
 		if(e.reg>=0x80)continue;er[e.reg]=e.value;if(e.reg!=0x4c)continue;
-		for(int v=0;v<8;++v)if((e.value&(1<<v))&&(solo<0||solo==v)&&(er[0x4d]&(1<<v))){
+		for(int v=0;v<8;++v)if(include_echo&&(e.value&(1<<v))&&(solo<0||solo==v)&&(er[0x4d]&(1<<v))){
 			int wave=(er[0x3d]&(1<<v))?noise:map[er[v*16+4]];
-			int sample=wave-OPL4_RAM_WAVE_BASE;if(sample<0||sample>=int(samples.size())||samples[sample].looped)continue;
+			int sample=wave-OPL4_RAM_WAVE_BASE;if(sample<0||sample>=int(samples.size()))continue;
 			int delay=std::max(1,er[0x7d]&15)*16*VGM_RATE/1000;double master=std::max(std::abs(signed8(er[0x0c])),std::abs(signed8(er[0x1c]))),echo=std::max(std::abs(signed8(er[0x2c])),std::abs(signed8(er[0x3c])));
 			if(master<=0||echo<=0)continue;double echo_gain=gain+20*std::log10(echo/master),feedback=std::abs(signed8(er[0x0d]))/128.0;
 			int64_t base=std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK);double amp=1.0;
-			for(int k=1;k<=16;++k){echo_hits.push_back({base+(int64_t)k*delay,(k&1)?8+v:16+v,v,wave,echo_gain+20*std::log10(amp),er});if(feedback<=0)break;amp*=feedback;if(amp<0.03)break;}
+			int64_t end=0;if(samples[sample].looped)for(size_t j=ei+1;j<events.size();++j)if((events[j].reg==0x5c||events[j].reg==0x4c)&&(events[j].value&(1<<v))){end=std::llround(events[j].clock*double(VGM_RATE)/SPC_CLOCK);break;}
+			if(samples[sample].looped&&!end)continue;
+			if(samples[sample].looped)echo_gain-=6.0206;
+			for(int k=1;k<=(samples[sample].looped?1:16);++k){int slot=(k&1)?8+v:16+v,note=echo_note++;echo_hits.push_back({base+(int64_t)k*delay,slot,v,wave,note,echo_gain+20*std::log10(amp),true,er});if(end)echo_hits.push_back({end+(int64_t)k*delay,slot,v,wave,note,0,false,er});if(feedback<=0)break;amp*=feedback;if(amp<0.03)break;}
 		}
 	}
-	std::sort(echo_hits.begin(),echo_hits.end(),[](const EchoHit&a,const EchoHit&b){return a.time<b.time;});size_t next_echo=0;
+	std::sort(echo_hits.begin(),echo_hits.end(),[](const EchoHit&a,const EchoHit&b){return a.time!=b.time?a.time<b.time:a.on<b.on;});size_t next_echo=0;std::array<int,24> echo_active;echo_active.fill(-1);
 	int64_t last=0,ls=loop_start?std::llround(*loop_start*VGM_RATE):0;std::optional<size_t> lo;
 	auto wait_to=[&](int64_t target){if(loop_start&&!lo&&last<=ls&&ls<=target){wait(o,ls-last);last=ls;lo=o.size();}if(target>last){wait(o,target-last);last=target;}};
-	auto flush_echo=[&](int64_t target){while(next_echo<echo_hits.size()&&echo_hits[next_echo].time<=target){auto&h=echo_hits[next_echo++];wait_to(h.time);key_on(o,h.slot,h.source,h.wave,h.regs,h.gain,minimum,127);}wait_to(target);};
+	auto flush_echo=[&](int64_t target){while(next_echo<echo_hits.size()&&echo_hits[next_echo].time<=target){auto&h=echo_hits[next_echo++];wait_to(h.time);if(h.on){key_on(o,h.slot,h.source,h.wave,h.regs,h.gain,minimum,127);echo_active[h.slot]=h.note;}else if(echo_active[h.slot]==h.note){reg(o,2,0x68+h.slot,level_pan(h.regs,h.source,0,minimum,127).second|0x40);echo_active[h.slot]=-1;}}wait_to(target);};
 	for(auto e:events){int64_t t=std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK);flush_echo(t);
 		if(e.reg>=0x80){int v=e.reg-0x80;env[v]=e.value;if((solo<0||solo==v)&&active[v])level(o,v,r,gain,minimum,true,env[v]);continue;}
 		r[e.reg]=e.value;
-		if(e.reg==0x4c){for(int v=0;v<8;++v)if((e.value&(1<<v))&&(solo<0||solo==v)&&wave_for(v)>=0){
+		if(e.reg==0x4c){for(int v=0;v<8;++v)if(include_direct&&(e.value&(1<<v))&&(solo<0||solo==v)&&wave_for(v)>=0){
 			// Keep the sampled pre-KON ENVX because a fast ADSR attack can complete
 			// between ENVX polling intervals.
 			aw[v]=wave_for(v);key_on(o,v,v,aw[v],r,gain,minimum,env[v]);active[v]=true;}}
@@ -736,12 +740,18 @@ static void debug_export(const fs::path& input, const Options& opt)
 	for(int voice=0;voice<8;++voice){
 		const fs::path original=dir/(stem+"-spc-voice-"+std::to_string(voice)+".wav");
 		const fs::path converted=dir/(stem+"-vgm-voice-"+std::to_string(voice)+".wav");
+		const fs::path direct=dir/(stem+"-vgm-voice-"+std::to_string(voice)+"-direct.wav");
+		const fs::path echo=dir/(stem+"-vgm-voice-"+std::to_string(voice)+"-echo.wav");
 		std::cout<<"rendering voice "<<voice<<" original SPC\n";
 		render_spc_wav(data,seconds,voice,original);
 		Tail solo=playback(data.data()+SPC_DSP_OFFSET,samples,events,seconds,opt.hardware_gain,opt.minimum_tl,voice,loop);
+		Tail solo_direct=playback(data.data()+SPC_DSP_OFFSET,samples,events,seconds,opt.hardware_gain,opt.minimum_tl,voice,loop,true,false);
+		Tail solo_echo=playback(data.data()+SPC_DSP_OFFSET,samples,events,seconds,opt.hardware_gain,opt.minimum_tl,voice,loop,false,true);
 		std::cout<<"rendering voice "<<voice<<" converted VGM\n";
 		render_vgm_wav(build_vgm(ram,solo,gain),solo.total,converted);
-		std::cout<<"wrote "<<original<<"\n"<<"wrote "<<converted<<"\n";
+		render_vgm_wav(build_vgm(ram,solo_direct,gain),solo_direct.total,direct);
+		render_vgm_wav(build_vgm(ram,solo_echo,gain),solo_echo.total,echo);
+		std::cout<<"wrote "<<original<<"\n"<<"wrote "<<converted<<"\n"<<"wrote "<<direct<<"\n"<<"wrote "<<echo<<"\n";
 	}
 }
 static void usage(const char*n){std::cerr<<"usage: "<<n<<" input.spc [-o output.vgm] [--creator NAME] [--wav] [--manifest file.csv] [--auto-playback] [--prune-samples] [--jobs N]\n       "<<n<<" --debug input.spc [--playback SECONDS] [--prune-samples] [--jobs N]\n       "<<n<<" --batch DIR [--batch-output DIR] [--creator NAME] [--manifest-output DIR] [--prune-samples] [--jobs N]\n"; }
