@@ -57,14 +57,16 @@ SPC clock:             1,024,000 Hz
 VGM timing rate:          44,100 Hz
 OPL4 clock:           33,868,800 Hz
 OPL4 ROM size:         2 MiB
-OPL4 RAM size:         256 KiB
+OPL4 RAM size:         configurable, 256 KiB default, up to 2 MiB
 OPL4 RAM base address: 0x200000
 RAM wave-number base:  384
 Wave header size:      12 bytes
 ```
 
-OPL4 RAM begins with room for 384 wave headers. Decoded sample payloads begin
-at `384 * 12`.
+With the standard 2 MiB YRW801 ROM, MoonSound sample RAM occupies the remaining
+wave-address region starting at `0x200000`, with hardware configurations up to
+2 MiB. OPL4 RAM begins with room for 384 wave headers. Decoded sample payloads
+begin at `384 * 12`.
 
 ## Conversion Pipeline
 
@@ -126,12 +128,14 @@ are referenced by playback commands and can affect rendered behavior.
 
 ## Sparse OPL4 RAM Blocks
 
-`--prune-samples` does not repack or renumber samples.
+`--prune-samples` does not renumber samples, but it tightly packs used sample
+payloads.
 
 It marks samples that receive a key-on during the exported interval, then emits
 multiple VGM `0x87` OPL4 RAM data blocks containing only required headers and
-sample payload ranges. Used samples retain the exact RAM addresses they have in
-the full bank.
+sample payload ranges. Used samples retain their OPL4 wave numbers, while their
+headers point at tightly packed payload addresses. Unused decoded samples no
+longer consume target OPL4 RAM.
 
 Noise data is omitted when SNES noise is never enabled.
 
@@ -142,6 +146,11 @@ total OPL4 RAM size
 start address within OPL4 RAM
 payload bytes
 ```
+
+The block's total RAM size is selected with `--opl4-ram-kib`. The converter
+accepts multiples of 128 KiB from 128 through 2048 and defaults to 256 KiB for
+broad cartridge compatibility. A VGM requiring more RAM needs a MoonSound or
+compatible cartridge with at least that much installed sample RAM.
 
 Multiple `0x87` blocks are supported by VGMPlay MSX. Sparse output has been
 verified to render byte-for-byte identical audio to full-bank output on tested

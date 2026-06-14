@@ -134,6 +134,7 @@ Useful playback controls:
 --minimum-tl VALUE
 --solo-voice 0..7
 --prune-samples
+--opl4-ram-kib N
 --jobs N
 ```
 
@@ -143,10 +144,21 @@ conversion enables the same timed playback behavior by default.
 `--prune-samples` reduces the embedded OPL4 sample bank to instruments that
 receive a key-on during the exported playback interval. This can substantially
 reduce file size, especially for short tracks that share a large SPC instrument
-bank. Used samples keep their original OPL4 wave numbers and RAM addresses;
-the VGM contains multiple sparse RAM data blocks that omit only unused ranges.
-This preserves the rendered audio while reducing both file size and MSX upload
-time.
+bank. Used samples keep their original OPL4 wave numbers, while their payloads
+are tightly packed into the selected target RAM. The VGM
+contains multiple sparse RAM data blocks that omit unused headers and payloads.
+This preserves the wave-number mapping and rendered audio while reducing RAM
+requirements, file size, and MSX upload time.
+It also prevents unused or invalid-looking SPC directory entries from consuming
+the configured OPL4 RAM budget.
+
+`--opl4-ram-kib` selects the target MoonSound sample-RAM capacity. It defaults
+to 256 KiB and accepts multiples of 128 KiB through 2048 KiB. For example,
+`--opl4-ram-kib 512` permits a 512 KiB decoded sample bank. Files requiring
+more RAM will not play correctly on cartridges with less installed sample RAM.
+
+`fetch_snesmusic.py` enables sample pruning by default and accepts the same
+choice, for example `fetch_snesmusic.py "Game" --opl4-ram-kib 512`.
 
 Run `vgm_cmp` over every top-level VGM in a directory and replace each original
 with its optimized version:
