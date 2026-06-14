@@ -64,8 +64,13 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then executable_suffix=".exe"; fi
           "$package/bin/spc2vgm$executable_suffix" --help
           "$package/bin/vgm_cmp$executable_suffix" 2>&1 | grep -q "VGM Compressor"
+          "$package/bin/unarr_extract$executable_suffix" 2>&1 | grep -q "Usage:"
           python "$package/scripts/package_vgmrips.py" --help
+          python "$package/scripts/fetch_snesmusic.py" --help
+          test -f "$package/scripts/package_vgmrips.cmd"
+          test -f "$package/scripts/fetch_snesmusic.cmd"
           test -f "$package/licenses/vgmtools-GPL-2.0.txt"
+          test -f "$package/licenses/unarr-LGPL-3.0.txt"
           test -f "$package/THIRD_PARTY_NOTICES.md"
 
       - name: Create ZIP

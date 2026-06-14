@@ -244,7 +244,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spc-dir", type=Path, help="directory containing matching SPC files")
     parser.add_argument("--game-name")
     parser.add_argument("--music-author")
-    parser.add_argument("--system", default="MSX2")
+    parser.add_argument("--system", default="Super Nintendo Entertainment System")
     parser.add_argument("--hardware", default="Moonsound (YMF278B)")
     parser.add_argument("--developer", default="Unknown")
     parser.add_argument("--publisher", default="Unknown")

@@ -7,3 +7,6 @@
 [submodule "external/vgmtools"]
 	path = external/vgmtools
 	url = https://github.com/vgmrips/vgmtools.git
+[submodule "extern/unarr"]
+	path = extern/unarr
+	url = https://github.com/selmf/unarr

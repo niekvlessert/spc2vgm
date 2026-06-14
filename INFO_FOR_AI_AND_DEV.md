@@ -36,6 +36,8 @@ Important dependencies:
 - `external/libvgm`: VGM rendering used for calibration and WAV/debug output.
 - `external/vgmtools`: source for the separately built bundled `vgm_cmp`
   executable.
+- `extern/unarr`: archive extraction library used by `unarr_extract` for
+  downloaded SNESmusic RSN files.
 
 Built tools:
 
@@ -43,6 +45,8 @@ Built tools:
 - `build/spc_trace`: raw SPC DSP-write tracer.
 - `build/spc_render`: original-SPC WAV renderer with optional voice solo.
 - `build/vgm_cmp`: bundled lossless VGM compressor used by packaging scripts.
+- `build/unarr_extract`: extracts SPC files from RSN/RAR, ZIP, 7z, and TAR
+  archives.
 
 ## Important Constants
 

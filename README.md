@@ -22,8 +22,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-The build creates `spc2vgm`, `spc_trace`, `spc_render`, and a bundled
-`vgm_cmp` executable in `build/`.
+The build creates `spc2vgm`, `spc_trace`, `spc_render`, bundled `vgm_cmp`, and
+the RSN archive extractor `unarr_extract` in `build/`.
 
 Install a complete package tree containing the executables, scripts,
 documentation, and third-party notices:
@@ -35,6 +35,13 @@ cmake --install build --prefix package/spc2vgm
 GitHub Actions builds downloadable ZIP packages for macOS Intel, macOS Apple
 silicon, Windows Intel, Linux Intel, and Linux ARM. Tagged builds also attach
 all five packages to the GitHub release.
+
+The `spc2vgm`, `spc_trace`, `spc_render`, `vgm_cmp`, and `unarr_extract`
+executables do not require Python. The soundtrack download and VGMRips
+packaging helpers require Python 3.10 or newer, but use only Python's standard
+library; no third-party modules or `pip install` step are needed. Without
+Python, the native conversion tools continue to work, but those two helper
+scripts cannot run.
 
 ## Usage
 
@@ -91,6 +98,27 @@ build/spc2vgm --batch music --creator "Your Name"
 
 The default creator is `spc2vgm`.
 
+Download a soundtrack and screenshot from SNESmusic.org, extract its SPCs,
+convert the complete soundtrack, optimize it, and create a VGMRips-style ZIP:
+
+```sh
+scripts/fetch_snesmusic.py "Plok!" --creator "Your Name"
+```
+
+On Windows, use `scripts\fetch_snesmusic.cmd` instead. The `.cmd` launcher
+locates Python and prints a clear requirement message when Python 3.10 or newer
+is unavailable.
+
+The script searches SNESmusic's soundtrack index and prints all matching
+regional releases. It selects the first result by default; use `--match N` to
+choose another result. Use `--output DIR` to select the parent output directory
+and `--jobs N` to control conversion concurrency.
+
+The resulting directory contains the downloaded RSN, extracted SPCs, converted
+VGMs, screenshot, and final ZIP. `--download-only` stops after downloading and
+extracting the SPCs. `--profile URL` bypasses search and converts a specific
+SNESmusic profile.
+
 Manifests are not written by default. Use `--manifest FILE` for a single
 conversion or `--manifest-output DIR` for batch manifests. Batch manifest
 filenames use the original stem with a `.csv` extension.
@@ -139,6 +167,8 @@ scripts/package_vgmrips.py music/vgm
 scripts/package_vgmrips.py music/vgm --name "Game Name" --creator "Your Name"
 ```
 
+On Windows, use `scripts\package_vgmrips.cmd`.
+
 Track titles are taken from VGM GD3 metadata when present. Otherwise, the
 script looks for matching SPC files in the VGM directory and its parent and
 uses their ID666 titles, then falls back to the original filename. Use
@@ -158,7 +188,9 @@ behavior for Bash users. Packaging stops if optimization fails.
 Package metadata can be supplied with `--game-name`, `--music-author`,
 `--developer`, `--publisher`, `--release-date`, `--system`, `--hardware`,
 `--version`, and `--notes`. Run `scripts/package_vgmrips.py --help` for all
-options.
+options. The package defaults identify the original system as
+`Super Nintendo Entertainment System` and playback hardware as
+`Moonsound (YMF278B)`.
 
 ## Debugging tools
 
