@@ -155,6 +155,37 @@ def find_vgm_cmp() -> Path:
     raise SystemExit("Unable to find bundled vgm_cmp. Rebuild spc2vgm or set VGM_CMP.")
 
 
+def converter_version() -> str:
+    script_directory = Path(__file__).resolve().parent
+    candidates = []
+    if os.environ.get("SPC2VGM"):
+        candidates.append(Path(os.environ["SPC2VGM"]))
+    for name in ("spc2vgm", "spc2vgm.exe"):
+        candidates += [
+            script_directory.parent / "bin" / name,
+            script_directory.parent / "build" / name,
+        ]
+        found = shutil.which(name)
+        if found:
+            candidates.append(Path(found))
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            result = subprocess.run(
+                [str(candidate), "--version"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        version = result.stdout.strip()
+        if version:
+            return version
+    return "spc2vgm version unknown"
+
+
 def optimize_vgm_directory(directory: Path) -> None:
     vgm_cmp = find_vgm_cmp()
     optimized = 0
@@ -191,7 +222,9 @@ def text_field(label: str, value: str) -> str:
     return f"{label + ':':<21}{value}"
 
 
-def make_description(args: argparse.Namespace, tracks: list[Track], package_name: str) -> str:
+def make_description(
+    args: argparse.Namespace, tracks: list[Track], package_name: str, conversion_version: str
+) -> str:
     game = args.game_name or most_common([track.game for track in tracks], package_name)
     artist = args.music_author or most_common([track.artist for track in tracks], "Unknown")
     lines = [
@@ -226,6 +259,7 @@ def make_description(args: argparse.Namespace, tracks: list[Track], package_name
         "",
         "Notes:",
         args.notes,
+        f"Converter version: {conversion_version}",
         "",
         "Package history:",
         f"{args.version} {args.date} {args.creator}: Initial package.",
@@ -333,7 +367,7 @@ def main() -> int:
         playlist = "\r\n".join(track.output_name for track in tracks) + "\r\n"
         with (stage / f"{package_name}.m3u").open("w", encoding="utf-8", newline="") as output_file:
             output_file.write(playlist)
-        description = make_description(args, tracks, package_name)
+        description = make_description(args, tracks, package_name, converter_version())
         with (stage / f"{package_name}.txt").open("w", encoding="utf-8", newline="") as output_file:
             output_file.write(description)
         shutil.copyfile(image, stage / f"{package_name}.png")

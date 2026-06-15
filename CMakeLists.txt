@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(spc2vgm VERSION 0.1.0 LANGUAGES C CXX)
+project(spc2vgm VERSION 0.8.0 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_NO_PACKAGE_REGISTRY ON)
 set(CMAKE_CXX_STANDARD 17)
@@ -68,6 +68,7 @@ endif()
 
 add_executable(spc2vgm src/spc2vgm.cpp)
 target_link_libraries(spc2vgm PRIVATE snes_spc vgm-player vgm-emu vgm-utils)
+target_compile_definitions(spc2vgm PRIVATE SPC2VGM_VERSION="${PROJECT_VERSION}")
 
 add_executable(spc_trace tools/spc_trace.cpp)
 target_link_libraries(spc_trace PRIVATE snes_spc)

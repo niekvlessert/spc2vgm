@@ -197,6 +197,9 @@ optimizations in place. Files that have already been optimized are left
 unchanged. The standalone `optimize_vgm_directory.sh` provides the same
 behavior for Bash users. Packaging stops if optimization fails.
 
+The TXT notes include the version reported by the bundled or local
+`spc2vgm --version`, so packages record which converter release created them.
+
 Package metadata can be supplied with `--game-name`, `--music-author`,
 `--developer`, `--publisher`, `--release-date`, `--system`, `--hardware`,
 `--version`, and `--notes`. Run `scripts/package_vgmrips.py --help` for all
