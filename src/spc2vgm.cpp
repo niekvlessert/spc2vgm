@@ -484,6 +484,7 @@ static std::pair<int,int> level_pan(const std::array<uint8_t,128>& r, int v, dou
 }
 static void wave_pitch(Bytes& o,int v,int wave,int p){auto [fn,oct]=pitch(p);reg(o,2,0x20+v,((wave>>8)&1)|((fn&127)<<1));reg(o,2,0x38+v,(oct<<4)|((fn>>7)&7));}
 static void level(Bytes& o,int v,const std::array<uint8_t,128>& r,double gain,int minimum,bool on,int envx=-1){auto [tl,pan]=level_pan(r,v,gain,minimum,envx);reg(o,2,0x50+v,(tl<<1)|1);reg(o,2,0x68+v,pan|(on?0x80:0));}
+static void mute_level(Bytes& o,int v){reg(o,2,0x50+v,0xff);}
 static void key_on(Bytes&o,int slot,int source,int wave,const std::array<uint8_t,128>&r,double gain,int minimum,int envx){
 	int b=source*16,p=r[b+2]|((r[b+3]&0x3f)<<8);auto[fn,oct]=pitch(p);reg(o,2,0x20+slot,((wave>>8)&1)|((fn&127)<<1));reg(o,2,0x38+slot,(oct<<4)|((fn>>7)&7)|((r[0x4d]&(1<<source))?8:0));reg(o,2,8+slot,wave);auto q=level_pan(r,source,gain,minimum,envx);reg(o,2,0x50+slot,(q.first<<1)|1);reg(o,2,0x68+slot,q.second);reg(o,2,0x80+slot,(r[0x2d]&(1<<source))?7:0);reg(o,2,0x98+slot,0xf0);reg(o,2,0xb0+slot,0);reg(o,2,0xc8+slot,0xf0);reg(o,2,0xe0+slot,0);reg(o,2,0x68+slot,q.second|0x80);
 }
@@ -555,10 +556,10 @@ static Tail optimize_tail(Tail in) {
 }
 static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const std::vector<Write>&events,double seconds,double gain,int minimum,int solo,std::optional<double> loop_start,bool include_direct=true,bool include_echo=true){
 	std::array<int,128> map;map.fill(-1);for(int i=0;i<int(samples.size());++i)for(int srcn:samples[i].srcn_aliases)map[srcn]=OPL4_RAM_WAVE_BASE+i;
-	std::array<uint8_t,128> r{};std::copy(dsp,dsp+128,r.begin());std::array<bool,8> active{};std::array<int,8> aw{},env{};Bytes o;reg(o,1,5,2);reg(o,2,2,0x10);reg(o,2,0xf9,0);
+	std::array<uint8_t,128> r{};std::copy(dsp,dsp+128,r.begin());std::array<bool,8> active{},pitch_muted{};std::array<int,8> aw{},env{};Bytes o;reg(o,1,5,2);reg(o,2,2,0x10);reg(o,2,0xf9,0);
 	for(int v=0;v<8;++v)env[v]=dsp[v*16+8];
 	int noise=OPL4_RAM_WAVE_BASE+samples.size();auto wave_for=[&](int v){return(r[0x3d]&(1<<v))?noise:map[r[v*16+4]];};
-	for(int v=0;v<8;++v)if(include_direct&&(solo<0||solo==v)&&(dsp[0x4c]&(1<<v))&&!(dsp[0x5c]&(1<<v))&&wave_for(v)>=0){aw[v]=wave_for(v);key_on(o,v,v,aw[v],r,gain,minimum,env[v]);active[v]=true;}
+	for(int v=0;v<8;++v)if(include_direct&&(solo<0||solo==v)&&(dsp[0x4c]&(1<<v))&&!(dsp[0x5c]&(1<<v))&&wave_for(v)>=0){aw[v]=wave_for(v);key_on(o,v,v,aw[v],r,gain,minimum,env[v]);active[v]=true;int b=v*16;pitch_muted[v]=!(r[b+2]|((r[b+3]&63)<<8));if(pitch_muted[v])mute_level(o,v);}
 	// Pre-schedule bounded finite-note taps and continuously tracked sustained echoes.
 	enum EchoAction{EchoOff,EchoOn,EchoUpdate};
 	enum EchoUpdate{EchoLevel=1,EchoPitch=2,EchoMod=4};
@@ -601,16 +602,16 @@ static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const 
 	auto wait_to=[&](int64_t target){if(loop_start&&!lo&&last<=ls&&ls<=target){wait(o,ls-last);last=ls;lo=o.size();}if(target>last){wait(o,target-last);last=target;}};
 	auto flush_echo=[&](int64_t target){while(next_echo<echo_hits.size()&&echo_hits[next_echo].time<=target){auto&h=echo_hits[next_echo++];wait_to(h.time);if(h.action==EchoOn){key_on(o,h.slot,h.source,h.wave,h.regs,h.gain,minimum,h.envx);echo_active[h.slot]=h.note;}else if(echo_active[h.slot]==h.note&&h.action==EchoOff){reg(o,2,0x68+h.slot,level_pan(h.regs,h.source,0,minimum,h.envx).second|0x40);echo_active[h.slot]=-1;}else if(echo_active[h.slot]==h.note){int b=h.source*16;if(h.update&EchoPitch)wave_pitch(o,h.slot,h.wave,h.regs[b+2]|((h.regs[b+3]&63)<<8));if(h.update&EchoMod)reg(o,2,0x80+h.slot,(h.regs[0x2d]&(1<<h.source))?7:0);if(h.update&EchoLevel)level(o,h.slot,h.regs,h.gain,minimum,true,h.envx);}}wait_to(target);};
 	for(auto e:events){int64_t t=std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK);flush_echo(t);
-		if(e.reg>=0x80){int v=e.reg-0x80;env[v]=e.value;if((solo<0||solo==v)&&active[v])level(o,v,r,gain,minimum,true,env[v]);continue;}
+		if(e.reg>=0x80){int v=e.reg-0x80;env[v]=e.value;if((solo<0||solo==v)&&active[v]&&!pitch_muted[v])level(o,v,r,gain,minimum,true,env[v]);continue;}
 		r[e.reg]=e.value;
 		if(e.reg==0x4c){for(int v=0;v<8;++v)if(include_direct&&(e.value&(1<<v))&&(solo<0||solo==v)&&wave_for(v)>=0){
 			// Keep the sampled pre-KON ENVX because a fast ADSR attack can complete
 			// between ENVX polling intervals.
-			aw[v]=wave_for(v);key_on(o,v,v,aw[v],r,gain,minimum,env[v]);active[v]=true;}}
+			aw[v]=wave_for(v);key_on(o,v,v,aw[v],r,gain,minimum,env[v]);active[v]=true;int b=v*16;pitch_muted[v]=!(r[b+2]|((r[b+3]&63)<<8));if(pitch_muted[v])mute_level(o,v);}}
 		else if(e.reg==0x5c){}
-		else if(e.reg==0x0c||e.reg==0x1c){for(int v=0;v<8;++v)if(active[v]&&(solo<0||solo==v))level(o,v,r,gain,minimum,true,env[v]);}
+		else if(e.reg==0x0c||e.reg==0x1c){for(int v=0;v<8;++v)if(active[v]&&(solo<0||solo==v)&&!pitch_muted[v])level(o,v,r,gain,minimum,true,env[v]);}
 		else if(e.reg==0x2d||e.reg==0x3d||e.reg==0x4d){for(int v=0;v<8;++v)if(active[v]&&(solo<0||solo==v)){if(e.reg==0x2d)reg(o,2,0x80+v,(e.value&(1<<v))?7:0);else if(e.reg==0x4d){int b=v*16;auto[fn,oct]=pitch(r[b+2]|((r[b+3]&63)<<8));reg(o,2,0x38+v,(oct<<4)|((fn>>7)&7)|((e.value&(1<<v))?8:0));}else{int w=wave_for(v);if(w>=0&&w!=aw[v]){int b=v*16;wave_pitch(o,v,w,r[b+2]|((r[b+3]&63)<<8));reg(o,2,8+v,w);aw[v]=w;}}}}
-		else{int v=e.reg>>4,s=e.reg&15;if(v<8&&active[v]&&(solo<0||solo==v)){if(s==0||s==1||s==5||s==7)level(o,v,r,gain,minimum,true,env[v]);if(s==2||s==3){int b=v*16;wave_pitch(o,v,aw[v],r[b+2]|((r[b+3]&63)<<8));}}}
+		else{int v=e.reg>>4,s=e.reg&15;if(v<8&&active[v]&&(solo<0||solo==v)){if((s==0||s==1||s==5||s==7)&&!pitch_muted[v])level(o,v,r,gain,minimum,true,env[v]);if(s==2||s==3){int b=v*16,p=r[b+2]|((r[b+3]&63)<<8);if(!p){pitch_muted[v]=true;mute_level(o,v);}else{wave_pitch(o,v,aw[v],p);if(pitch_muted[v])level(o,v,r,gain,minimum,true,env[v]);pitch_muted[v]=false;}}}}
 	}
 	int total=std::max<int64_t>(last,std::llround(seconds*VGM_RATE));flush_echo(total);return optimize_tail({std::move(o),total,lo,int(ls)});
 }
