@@ -99,6 +99,10 @@ accurately. The converter therefore drives OPL4 total level from live SNES
 envelope values. Do not replace this with static ADSR mapping without extensive
 voice-by-voice comparison.
 
+OPL4 envelope registers are initialized with instant attack and neutral/frozen
+decay, sustain, and release behavior. Direct voice amplitude comes from traced
+`ENVX` updates translated into OPL4 total-level writes.
+
 After a key-on, ENVX is force-emitted even when its sampled value matches the
 previous value. This handles very fast attacks that reset and recover between
 normal polling points.
@@ -178,20 +182,33 @@ SNES echo/FIR cannot be reproduced exactly by OPL4.
 
 Current echo approximation:
 
-- Applies to key-ons whose voice is enabled in `EON`. Looped samples are
-  supported when a following `KOFF` or replacement `KON` bounds the echo note.
-- A looped sample gets one attenuated delayed copy rather than repeated
-  retriggers, avoiding machine-gun artifacts and indefinitely overlapping taps.
-- Schedules repeated delayed key-ons on spare OPL4 slots.
-- Uses `EDL`, echo volume, master volume, and feedback to approximate timing and
-  decay.
+- Applies to key-ons whose voice is enabled in `EON` while echo writes are
+  enabled by `FLG`.
+- Uses separate left/right `EVOL` values when deriving OPL4 level and pan.
+- Uses `EDL`, feedback, and a conservative magnitude estimate from the eight
+  FIR coefficients to approximate timing, decay, and filter response.
+- Non-looped samples receive one or two bounded taps depending on feedback.
+  Their natural pitched sample duration and earlier key-off/replacement events
+  bound the taps.
+- Looped sustained samples receive one continuously tracked delayed voice.
+  Delayed pitch, pitch-modulation, volume, envelope, EVOL, and FIR changes are
+  copied to it; its source key-off, replacement key-on, EON disable, or echo
+  write-disable event stops it.
+- When a sustained source ends, its delayed voice remains active for a bounded
+  sequence of explicit level updates spaced by `EDL`. Each step follows `EFB`
+  decay, approximating sound already circulating in the SPC echo buffer without
+  relying on OPL4 autonomous release.
+- Echo updates are quantized and emit only the affected OPL4 register group to
+  limit VGM command-stream growth.
 - Alternates between two spare slots per source voice.
 - Debug `vgm-voice-N.wav` renders include the direct slot and both extra echo
   slots owned by source voice N. `-direct.wav` and `-echo.wav` isolate them.
 
 Other limitations:
 
-- FIR filtering is not reproduced exactly.
+- FIR phase, polarity, and arbitrary frequency response cannot be reproduced
+  exactly by OPL4; only a conservative response-magnitude approximation is
+  applied.
 - Pitch modulation is approximated.
 - Noise uses a generated OPL4 RAM noise sample.
 - Some DSP behaviors cannot be mapped exactly to OPL4 hardware.

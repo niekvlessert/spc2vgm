@@ -253,10 +253,15 @@ Use `--playback SECONDS` to limit the debug render duration.
 ## Current approximations
 
 - SNES echo and FIR filtering cannot be reproduced exactly by OPL4.
-- Echoed looped samples are bounded by their following key-off or replacement
-  key-on and use one attenuated delayed copy, so the spare OPL4 echo slots do
-  not ring indefinitely or repeatedly retrigger sustained instruments.
+- Echo uses stereo `EVOL`, `EDL`, feedback, echo-write-disable state, and a
+  conservative FIR-response estimate.
+- Sustained looped notes use one continuously tracked delayed voice. Finite
+  notes use one or two bounded taps based on feedback and estimated duration.
+- After sustained notes end, explicit `EDL`-spaced level updates approximate
+  the remaining `EFB`-decaying sound already circulating in the echo buffer.
+- OPL4 cannot reproduce arbitrary SNES FIR phase, polarity, or frequency
+  response exactly.
 - Pitch modulation and noise are approximated when a track uses them.
-- SNES ADSR and GAIN rates are mapped to the closest OPL4 envelope settings.
-- The SNES DSP's exact live envelope position is not available to OPL4, so
-  complex envelope transitions can still differ.
+- SNES ADSR and GAIN envelopes are followed using traced live `ENVX` level
+  updates. OPL4 autonomous ADSR is kept neutral because static rate mapping
+  caused sustain and percussion regressions.

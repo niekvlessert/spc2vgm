@@ -487,6 +487,14 @@ static void level(Bytes& o,int v,const std::array<uint8_t,128>& r,double gain,in
 static void key_on(Bytes&o,int slot,int source,int wave,const std::array<uint8_t,128>&r,double gain,int minimum,int envx){
 	int b=source*16,p=r[b+2]|((r[b+3]&0x3f)<<8);auto[fn,oct]=pitch(p);reg(o,2,0x20+slot,((wave>>8)&1)|((fn&127)<<1));reg(o,2,0x38+slot,(oct<<4)|((fn>>7)&7)|((r[0x4d]&(1<<source))?8:0));reg(o,2,8+slot,wave);auto q=level_pan(r,source,gain,minimum,envx);reg(o,2,0x50+slot,(q.first<<1)|1);reg(o,2,0x68+slot,q.second);reg(o,2,0x80+slot,(r[0x2d]&(1<<source))?7:0);reg(o,2,0x98+slot,0xf0);reg(o,2,0xb0+slot,0);reg(o,2,0xc8+slot,0xf0);reg(o,2,0xe0+slot,0);reg(o,2,0x68+slot,q.second|0x80);
 }
+static std::array<uint8_t,128> echo_regs(std::array<uint8_t,128> r) {
+	r[0x0c]=r[0x2c];r[0x1c]=r[0x3c];return r;
+}
+static double fir_gain_db(const std::array<uint8_t,128>& r) {
+	double sum=0,energy=0;for(int i=0;i<8;++i){double c=signed8(r[0x0f+i*16])/128.0;sum+=c;energy+=c*c;}
+	if(energy<1e-9)return -96;double response=std::clamp(0.5*std::abs(sum)+0.5*std::sqrt(energy),0.03,1.5);
+	return 20*std::log10(response);
+}
 
 struct Tail { Bytes bytes; int total; std::optional<size_t> loop_offset; int loop_sample; };
 static void append_optimized_wait(Bytes& out, int64_t samples) {
@@ -551,27 +559,47 @@ static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const 
 	for(int v=0;v<8;++v)env[v]=dsp[v*16+8];
 	int noise=OPL4_RAM_WAVE_BASE+samples.size();auto wave_for=[&](int v){return(r[0x3d]&(1<<v))?noise:map[r[v*16+4]];};
 	for(int v=0;v<8;++v)if(include_direct&&(solo<0||solo==v)&&(dsp[0x4c]&(1<<v))&&!(dsp[0x5c]&(1<<v))&&wave_for(v)>=0){aw[v]=wave_for(v);key_on(o,v,v,aw[v],r,gain,minimum,env[v]);active[v]=true;}
-	struct EchoHit{int64_t time;int slot,source,wave,note;double gain;bool on;std::array<uint8_t,128> regs;};
+	// Pre-schedule bounded finite-note taps and continuously tracked sustained echoes.
+	enum EchoAction{EchoOff,EchoOn,EchoUpdate};
+	enum EchoUpdate{EchoLevel=1,EchoPitch=2,EchoMod=4};
+	struct EchoHit{int64_t time;int slot,source,wave,note,envx;double gain;EchoAction action;uint8_t update;std::array<uint8_t,128> regs;};
 	std::vector<EchoHit> echo_hits;std::array<uint8_t,128> er=r;
 	int echo_note=0;
 	for(size_t ei=0;ei<events.size();++ei){auto e=events[ei];
 		if(e.reg>=0x80)continue;er[e.reg]=e.value;if(e.reg!=0x4c)continue;
-		for(int v=0;v<8;++v)if(include_echo&&(e.value&(1<<v))&&(solo<0||solo==v)&&(er[0x4d]&(1<<v))){
+		for(int v=0;v<8;++v)if(include_echo&&(e.value&(1<<v))&&(solo<0||solo==v)&&(er[0x4d]&(1<<v))&&!(er[0x6c]&0x20)){
 			int wave=(er[0x3d]&(1<<v))?noise:map[er[v*16+4]];
 			int sample=wave-OPL4_RAM_WAVE_BASE;if(sample<0||sample>=int(samples.size()))continue;
-			int delay=std::max(1,er[0x7d]&15)*16*VGM_RATE/1000;double master=std::max(std::abs(signed8(er[0x0c])),std::abs(signed8(er[0x1c]))),echo=std::max(std::abs(signed8(er[0x2c])),std::abs(signed8(er[0x3c])));
-			if(master<=0||echo<=0)continue;double echo_gain=gain+20*std::log10(echo/master),feedback=std::abs(signed8(er[0x0d]))/128.0;
-			int64_t base=std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK);double amp=1.0;
-			int64_t end=0;if(samples[sample].looped)for(size_t j=ei+1;j<events.size();++j)if((events[j].reg==0x5c||events[j].reg==0x4c)&&(events[j].value&(1<<v))){end=std::llround(events[j].clock*double(VGM_RATE)/SPC_CLOCK);break;}
-			if(samples[sample].looped&&!end)continue;
-			if(samples[sample].looped)echo_gain-=6.0206;
-			for(int k=1;k<=(samples[sample].looped?1:16);++k){int slot=(k&1)?8+v:16+v,note=echo_note++;echo_hits.push_back({base+(int64_t)k*delay,slot,v,wave,note,echo_gain+20*std::log10(amp),true,er});if(end)echo_hits.push_back({end+(int64_t)k*delay,slot,v,wave,note,0,false,er});if(feedback<=0)break;amp*=feedback;if(amp<0.03)break;}
+			double evol=std::max(std::abs(signed8(er[0x2c])),std::abs(signed8(er[0x3c])));if(evol<=0)continue;
+			int64_t delay=std::max(1,er[0x7d]&15)*16*VGM_RATE/1000,base=std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK);
+			int p=std::max(1,int(er[v*16+2]|((er[v*16+3]&63)<<8)));
+			int64_t natural=base+std::llround(samples[sample].pcm.size()*4096.0/p*VGM_RATE/32000.0);
+			int64_t end=samples[sample].looped?std::llround(seconds*VGM_RATE):natural;
+			for(size_t j=ei+1;j<events.size();++j){auto x=events[j];if(x.reg>=0x80)continue;int64_t xt=std::llround(x.clock*double(VGM_RATE)/SPC_CLOCK);
+				if(((x.reg==0x5c||x.reg==0x4c)&&(x.value&(1<<v)))||(x.reg==0x4d&&!(x.value&(1<<v)))||(x.reg==0x6c&&(x.value&0x20))){end=std::min(end,xt);break;}}
+			if(end<=base)continue;
+			double feedback=std::abs(signed8(er[0x0d]))/128.0,amp=1.0;
+			int taps=!samples[sample].looped&&feedback>=0.12?2:1;double base_gain=gain+fir_gain_db(er)+(samples[sample].looped?-6.0:-3.0);
+			for(int k=1;k<=taps;++k){int slot=(k&1)?8+v:16+v,note=echo_note++;double tap_gain=base_gain+20*std::log10(amp)-(k-1)*6.0;auto nr=er;int ne=127;
+				echo_hits.push_back({base+k*delay,slot,v,wave,note,ne,tap_gain,EchoOn,0,echo_regs(nr)});
+				int last_ne=ne;int64_t last_env_update=base;
+				if(samples[sample].looped)for(size_t j=ei+1;j<events.size();++j){auto x=events[j];int64_t xt=std::llround(x.clock*double(VGM_RATE)/SPC_CLOCK);if(xt>=end)break;
+					uint8_t update=0;if(x.reg>=0x80){if(x.reg==0x80+v){ne=x.value;if(std::abs(ne-last_ne)>=4&&xt-last_env_update>=VGM_RATE/250){update|=EchoLevel;last_ne=ne;last_env_update=xt;}}}else{nr[x.reg]=x.value;int sv=x.reg>>4,s=x.reg&15;
+						if(x.reg==0x2c||x.reg==0x3c||s==15||(sv==v&&(s==0||s==1||s==5||s==7)))update|=EchoLevel;
+						if(sv==v&&(s==2||s==3))update|=EchoPitch;if(x.reg==0x2d)update|=EchoMod;}
+					double update_gain=gain+fir_gain_db(nr)+(samples[sample].looped?-6.0:-3.0)+20*std::log10(amp)-(k-1)*6.0;
+					if(update)echo_hits.push_back({xt+k*delay,slot,v,wave,note,ne,update_gain,EchoUpdate,update,echo_regs(nr)});
+				}
+				int64_t stop=end+k*delay;
+				bool has_tail=samples[sample].looped&&feedback>=0.08;if(has_tail){double tail=feedback;for(int decay=1;decay<=8&&tail>=0.08;++decay){stop=end+(k+decay)*delay;double tail_gain=base_gain-13.0+20*std::log10(amp*tail)-(k-1)*6.0;echo_hits.push_back({stop,slot,v,wave,note,127,tail_gain,EchoUpdate,EchoLevel,echo_regs(nr)});tail*=feedback;}}
+				echo_hits.push_back({stop+(has_tail?delay:1),slot,v,wave,note,ne,0,EchoOff,0,echo_regs(nr)});amp*=feedback;
+			}
 		}
 	}
-	std::sort(echo_hits.begin(),echo_hits.end(),[](const EchoHit&a,const EchoHit&b){return a.time!=b.time?a.time<b.time:a.on<b.on;});size_t next_echo=0;std::array<int,24> echo_active;echo_active.fill(-1);
+	std::sort(echo_hits.begin(),echo_hits.end(),[](const EchoHit&a,const EchoHit&b){return a.time!=b.time?a.time<b.time:a.action<b.action;});size_t next_echo=0;std::array<int,24> echo_active;echo_active.fill(-1);
 	int64_t last=0,ls=loop_start?std::llround(*loop_start*VGM_RATE):0;std::optional<size_t> lo;
 	auto wait_to=[&](int64_t target){if(loop_start&&!lo&&last<=ls&&ls<=target){wait(o,ls-last);last=ls;lo=o.size();}if(target>last){wait(o,target-last);last=target;}};
-	auto flush_echo=[&](int64_t target){while(next_echo<echo_hits.size()&&echo_hits[next_echo].time<=target){auto&h=echo_hits[next_echo++];wait_to(h.time);if(h.on){key_on(o,h.slot,h.source,h.wave,h.regs,h.gain,minimum,127);echo_active[h.slot]=h.note;}else if(echo_active[h.slot]==h.note){reg(o,2,0x68+h.slot,level_pan(h.regs,h.source,0,minimum,127).second|0x40);echo_active[h.slot]=-1;}}wait_to(target);};
+	auto flush_echo=[&](int64_t target){while(next_echo<echo_hits.size()&&echo_hits[next_echo].time<=target){auto&h=echo_hits[next_echo++];wait_to(h.time);if(h.action==EchoOn){key_on(o,h.slot,h.source,h.wave,h.regs,h.gain,minimum,h.envx);echo_active[h.slot]=h.note;}else if(echo_active[h.slot]==h.note&&h.action==EchoOff){reg(o,2,0x68+h.slot,level_pan(h.regs,h.source,0,minimum,h.envx).second|0x40);echo_active[h.slot]=-1;}else if(echo_active[h.slot]==h.note){int b=h.source*16;if(h.update&EchoPitch)wave_pitch(o,h.slot,h.wave,h.regs[b+2]|((h.regs[b+3]&63)<<8));if(h.update&EchoMod)reg(o,2,0x80+h.slot,(h.regs[0x2d]&(1<<h.source))?7:0);if(h.update&EchoLevel)level(o,h.slot,h.regs,h.gain,minimum,true,h.envx);}}wait_to(target);};
 	for(auto e:events){int64_t t=std::llround(e.clock*double(VGM_RATE)/SPC_CLOCK);flush_echo(t);
 		if(e.reg>=0x80){int v=e.reg-0x80;env[v]=e.value;if((solo<0||solo==v)&&active[v])level(o,v,r,gain,minimum,true,env[v]);continue;}
 		r[e.reg]=e.value;
