@@ -238,6 +238,34 @@ static void make_header(Bytes& ram, int wave, uint32_t start, int count, int loo
 	h[7] = 0; h[8] = 0xf0; h[9] = 0; h[10] = 0x0f; h[11] = 0;
 }
 
+static bool tiny_looped_sample(const Sample& s) {
+	return s.looped && int(s.pcm.size()) == 48 && s.loop_sample == 16;
+}
+
+static std::vector<int16_t> decorrelate_tiny_loop(const Sample& s) {
+	if (!tiny_looped_sample(s)) return s.pcm;
+	std::vector<int16_t> out;
+	uint32_t state = 0x9e3779b9u ^ uint32_t(s.index * 0x45d9f3bu) ^ uint32_t(s.start);
+	auto rnd = [&] {
+		state ^= state << 13;
+		state ^= state >> 17;
+		state ^= state << 5;
+		return state;
+	};
+	const size_t target = 4096;
+	int prev = 0;
+	while (out.size() < target) {
+		const int sign = (rnd() & 1) ? 1 : -1;
+		const int gain = 128 + int(rnd() & 127);
+		int v = s.pcm[rnd() % s.pcm.size()];
+		v = sign * v * gain / 256;
+		v = (v * 3 + prev) / 4;
+		prev = v;
+		out.push_back(int16_t(std::clamp(v, -32768, 32767)));
+	}
+	return out;
+}
+
 static RamImage build_ram(const std::vector<Sample>& samples, bool sparse, bool noise_used, uint32_t ram_size) {
 	Bytes ram(ram_size);
 	std::vector<bool> included(ram_size);
@@ -245,7 +273,7 @@ static RamImage build_ram(const std::vector<Sample>& samples, bool sparse, bool 
 		if (sparse) std::fill(included.begin() + start, included.begin() + start + size, true);
 	};
 	size_t normal = 0;
-	for (auto& s : samples) if (!sparse || s.used) normal += (s.pcm.size() + (!s.looped)) * 2;
+	for (auto& s : samples) if (!sparse || s.used) normal += (tiny_looped_sample(s) ? 4096 : s.pcm.size() + (!s.looped)) * 2;
 	int64_t budget = ram_size - OPL4_SAMPLE_BASE - normal - (noise_used ? 8192 * 2 : 0);
 	std::vector<std::tuple<int, int, int>> choices;
 	for (int i = 0; i < int(samples.size()); ++i) {
@@ -260,7 +288,7 @@ static RamImage build_ram(const std::vector<Sample>& samples, bool sparse, bool 
 		if (bytes <= budget) { stabilized.insert(wave); budget -= bytes; }
 	size_t pos = OPL4_SAMPLE_BASE;
 	for (int wave = 0; wave < int(samples.size()); ++wave) {
-		auto& s = samples[wave]; std::vector<int16_t> pcm = s.pcm; int loop = s.loop_sample;
+		auto& s = samples[wave]; std::vector<int16_t> pcm = decorrelate_tiny_loop(s); int loop = tiny_looped_sample(s) ? 0 : s.loop_sample;
 		if (sparse && !s.used) continue;
 		if (stabilized.count(wave)) { loop = pcm.size(); pcm.insert(pcm.end(), s.continuation.begin(), s.continuation.end()); }
 		else if (!s.looped) { loop = pcm.size(); pcm.push_back(0); }
@@ -579,20 +607,23 @@ static Tail playback(const uint8_t*dsp,const std::vector<Sample>& samples,const 
 			for(size_t j=ei+1;j<events.size();++j){auto x=events[j];if(x.reg>=0x80)continue;int64_t xt=std::llround(x.clock*double(VGM_RATE)/SPC_CLOCK);
 				if(((x.reg==0x5c||x.reg==0x4c)&&(x.value&(1<<v)))||(x.reg==0x4d&&!(x.value&(1<<v)))||(x.reg==0x6c&&(x.value&0x20))){end=std::min(end,xt);break;}}
 			if(end<=base)continue;
+			int voice_level=std::max(std::abs(signed8(er[v*16])),std::abs(signed8(er[v*16+1])));
+			bool short_looped=samples[sample].looped&&end-base<VGM_RATE/6&&voice_level<=16;if(short_looped)end=std::min<int64_t>(end,base+VGM_RATE/30);
+			bool sustained_looped=samples[sample].looped&&!short_looped;
 			double feedback=std::abs(signed8(er[0x0d]))/128.0,amp=1.0;
-			int taps=!samples[sample].looped&&feedback>=0.12?2:1;double base_gain=gain+fir_gain_db(er)+(samples[sample].looped?-6.0:-3.0);
+			int taps=!sustained_looped&&feedback>=0.12?2:1;double base_gain=gain+fir_gain_db(er)+(sustained_looped?-6.0:-3.0);
 			for(int k=1;k<=taps;++k){int slot=(k&1)?8+v:16+v,note=echo_note++;double tap_gain=base_gain+20*std::log10(amp)-(k-1)*6.0;auto nr=er;int ne=127;
 				echo_hits.push_back({base+k*delay,slot,v,wave,note,ne,tap_gain,EchoOn,0,echo_regs(nr)});
 				int last_ne=ne;int64_t last_env_update=base;
-				if(samples[sample].looped)for(size_t j=ei+1;j<events.size();++j){auto x=events[j];int64_t xt=std::llround(x.clock*double(VGM_RATE)/SPC_CLOCK);if(xt>=end)break;
+				if(sustained_looped)for(size_t j=ei+1;j<events.size();++j){auto x=events[j];int64_t xt=std::llround(x.clock*double(VGM_RATE)/SPC_CLOCK);if(xt>=end)break;
 					uint8_t update=0;if(x.reg>=0x80){if(x.reg==0x80+v){ne=x.value;if(std::abs(ne-last_ne)>=4&&xt-last_env_update>=VGM_RATE/250){update|=EchoLevel;last_ne=ne;last_env_update=xt;}}}else{nr[x.reg]=x.value;int sv=x.reg>>4,s=x.reg&15;
 						if(x.reg==0x2c||x.reg==0x3c||s==15||(sv==v&&(s==0||s==1||s==5||s==7)))update|=EchoLevel;
 						if(sv==v&&(s==2||s==3))update|=EchoPitch;if(x.reg==0x2d)update|=EchoMod;}
-					double update_gain=gain+fir_gain_db(nr)+(samples[sample].looped?-6.0:-3.0)+20*std::log10(amp)-(k-1)*6.0;
+					double update_gain=gain+fir_gain_db(nr)+(sustained_looped?-6.0:-3.0)+20*std::log10(amp)-(k-1)*6.0;
 					if(update)echo_hits.push_back({xt+k*delay,slot,v,wave,note,ne,update_gain,EchoUpdate,update,echo_regs(nr)});
 				}
 				int64_t stop=end+k*delay;
-				bool has_tail=samples[sample].looped&&feedback>=0.08;if(has_tail){double tail=feedback;for(int decay=1;decay<=8&&tail>=0.08;++decay){stop=end+(k+decay)*delay;double tail_gain=base_gain-13.0+20*std::log10(amp*tail)-(k-1)*6.0;echo_hits.push_back({stop,slot,v,wave,note,127,tail_gain,EchoUpdate,EchoLevel,echo_regs(nr)});tail*=feedback;}}
+				bool has_tail=sustained_looped&&feedback>=0.08;if(has_tail){double tail=feedback;for(int decay=1;decay<=8&&tail>=0.08;++decay){stop=end+(k+decay)*delay;double tail_gain=base_gain-13.0+20*std::log10(amp*tail)-(k-1)*6.0;echo_hits.push_back({stop,slot,v,wave,note,127,tail_gain,EchoUpdate,EchoLevel,echo_regs(nr)});tail*=feedback;}}
 				echo_hits.push_back({stop+(has_tail?delay:1),slot,v,wave,note,ne,0,EchoOff,0,echo_regs(nr)});amp*=feedback;
 			}
 		}
