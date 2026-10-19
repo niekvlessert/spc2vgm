@@ -13,6 +13,13 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+if(EMSCRIPTEN)
+    list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/wasm")
+    add_compile_options(-fexceptions -sUSE_ZLIB=1)
+    add_link_options(-fexceptions -sUSE_ZLIB=1)
+    set(UTIL_THREADING OFF CACHE BOOL "" FORCE)
+endif()
+
 find_package(ZLIB REQUIRED)
 
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extern/unarr/CMakeLists.txt")
@@ -108,3 +115,23 @@ install(FILES
 install(FILES README.md INFO_FOR_AI_AND_DEV.md THIRD_PARTY_NOTICES.md DESTINATION .)
 install(FILES external/vgmtools/LICENSE DESTINATION licenses RENAME vgmtools-GPL-2.0.txt)
 install(FILES extern/unarr/COPYING DESTINATION licenses RENAME unarr-LGPL-3.0.txt)
+
+# Independent, single-threaded modules. JavaScript schedules tracks in a Worker.
+if(EMSCRIPTEN)
+    foreach(tool IN ITEMS spc2vgm unarr_extract vgm_cmp)
+        set_target_properties(${tool} PROPERTIES
+            SUFFIX ".js"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/web")
+        target_link_options(${tool} PRIVATE
+            "-sMODULARIZE=1"
+            "-sEXPORT_NAME=create_${tool}"
+            "-sENVIRONMENT=web,worker,node"
+            "-sINVOKE_RUN=0"
+            "-sEXIT_RUNTIME=0"
+            "-sALLOW_MEMORY_GROWTH=1"
+            "-sMAXIMUM_MEMORY=1073741824"
+            "-sSTACK_SIZE=1048576"
+            "-sFORCE_FILESYSTEM=1"
+            "-sEXPORTED_RUNTIME_METHODS=['FS','callMain']")
+    endforeach()
+endif()

@@ -28,3 +28,11 @@ The complete LGPLv3 license is included in release packages as
 `spc2vgm` also uses the pinned `external/libvgm` and
 `external/smwcentral-spc-player` submodules. Their source and applicable
 license information are available through those submodules.
+
+## Browser Build
+
+The GitHub Pages build distributes these tools as WebAssembly with JavaScript
+loaders, and retains the same upstream licenses. Complete corresponding source
+and build instructions are in this repository and its pinned submodules. The
+web ZIP writer and interface are implemented in this repository; they do not
+load third-party JavaScript from a CDN.

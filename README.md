@@ -268,3 +268,73 @@ Use `--playback SECONDS` to limit the debug render duration.
 - SNES ADSR and GAIN envelopes are followed using traced live `ENVX` level
   updates. OPL4 autonomous ADSR is kept neutral because static rate mapping
   caused sustain and percussion regressions.
+
+## Browser converter / GitHub Pages
+
+The `web/` interface converts a local RSN archive (or individual SPC files) into
+an ordinary ZIP of OPL4 VGM files. All extraction, emulation, volume matching,
+optional `vgm_cmp` optimization, and ZIP creation happen in the browser. No
+music files are uploaded. This is not the image-dependent VGMRips packager.
+
+The web build uses Emscripten **4.0.23**, CMake 3.25+, and the same pinned
+submodules as the native build:
+
+```sh
+git submodule update --init --recursive
+# Install/activate Emscripten 4.0.23 and source emsdk_env.sh first.
+scripts/build_web.sh
+python3 -m http.server 8000 --directory web
+```
+
+Open `http://localhost:8000` (opening `index.html` as a `file:` URL will not
+load workers correctly). Generated JS/WASM and copied notices are build
+outputs, not committed binaries.
+
+For GitHub Pages, set the repository's **Settings → Pages → Build and
+deployment → Source** to **GitHub Actions**. The `pages.yml` workflow builds,
+checks native/WebAssembly conversion parity and archive/ZIP handling, then
+publishes `web/` on pushes to `main`. Pull requests build and test without
+publishing. The intended project URL is
+`https://niekvlessert.github.io/spc2vgm/`.
+
+The browser build runs one single-threaded native conversion in a fresh Web
+Worker per track. This keeps the interface responsive, allows cancellation,
+and releases each native heap before the next track. It does not require
+SharedArrayBuffer or custom cross-origin-isolation headers. Native CLI builds
+retain their existing multithreaded batch processing.
+
+Browser defaults match the soundtrack helper: automatic duration and volume
+matching, sample pruning, 256 KiB target sample RAM, and optional `vgm_cmp`
+optimization enabled. Track-length overrides are available for quick tests.
+Increasing RAM requires matching MoonSound hardware. A conversion report in
+the ZIP lists successful and failed tracks; failures do not silently disappear.
+
+To keep memory bounded, the initial web version accepts 64 MiB of total input,
+at most 2,000 extracted SPCs, 16 MiB per extracted entry, 256 MiB of extracted
+SPCs, and 512 MiB of uncompressed VGM output. Memory availability varies by
+browser, especially on phones. One archive per run is supported. The bundled
+unarr determines supported RAR compression variants; an `.rsn` extension alone
+does not guarantee compatibility. Archives with duplicate SPC basenames are
+rejected rather than overwriting tracks during flattened extraction.
+
+### Web verification
+
+After building the web modules and a native reference in `build-native/`:
+
+```sh
+node tests/web-smoke.cjs
+python3 tests/prepare_archives.py
+node tests/extract-test.cjs
+node tests/zip-test.mjs
+python3 tests/check_zip.py
+```
+
+Fixtures are original synthetic SPC programs (tone, noise, and echo), with
+ZIP and RAR4/RSN packs generated locally. No commercial soundtracks are
+included. Byte parity on these fixtures is a regression check; real soundtrack
+compatibility and performance should also be tested before declaring a release.
+
+For the optional browser integration checks, run `npm ci`,
+`npx playwright install chromium`, `npm run test:browser`, and
+`python3 tests/check_browser_zip.py`. CI runs these checks automatically under
+the `/spc2vgm/` URL prefix to verify project-site asset paths.

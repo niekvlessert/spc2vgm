@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Convert SNES RSN soundtracks to MoonSound / OPL4 VGM packs in your browser.">
+<title>spc2vgm — Soundtracks, reimagined for OPL4</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<main>
+<header><a class="brand" href="./">spc<span>2</span>vgm<span class="badge">WEB</span></a><a href="https://github.com/niekvlessert/spc2vgm">Source ↗</a></header>
+<section class="intro"><p class="eyebrow">SNES → MOONSOUND / OPL4</p><h1>A new home for<br>your soundtracks.</h1><p>Drop an RSN pack. Get a VGM ZIP.<br>Converted on your device, with the original instrument samples.</p></section>
+<section class="panel" aria-label="Soundtrack converter">
+<label id="drop" class="drop" for="files"><span class="icon" aria-hidden="true">↓</span><strong>Drop your soundtrack here</strong><span>or click to choose an RSN pack or SPC tracks</span><small>RSN · RAR · ZIP · 7Z · SPC / up to 64 MiB total input</small><input id="files" type="file" accept=".rsn,.rar,.zip,.7z,.spc" multiple></label>
+<div id="selection" class="selection" aria-live="polite">No soundtrack selected</div>
+<div class="settings">
+<label>MoonSound sample RAM<select id="ram"><option value="128">128 KiB</option><option value="256" selected>256 KiB · default</option><option value="512">512 KiB</option><option value="1024">1 MiB</option><option value="2048">2 MiB</option></select></label>
+<label>Track length<select id="duration"><option value="0">Automatic · metadata & loops</option><option value="10">10 seconds · quick test</option><option value="60">60 seconds</option><option value="120">120 seconds</option><option value="180">180 seconds</option></select></label>
+<label>Creator<input id="creator" type="text" maxlength="120" value="spc2vgm" autocomplete="off"></label>
+</div>
+<label class="check"><input id="optimize" type="checkbox" checked> Optimize VGM command streams</label>
+<div class="actions"><button id="convert" disabled>Convert soundtrack <span aria-hidden="true">→</span></button><button id="cancel" class="secondary" hidden>Cancel</button><a id="download" class="download" hidden>Download VGM ZIP ↓</a></div>
+<p id="status" role="status">Ready when you are. No account or upload required.</p>
+<progress id="progress" max="1" value="0" hidden></progress>
+<ol id="tracks" aria-label="Tracks"></ol>
+<details><summary>Conversion log</summary><pre id="log"></pre></details>
+</section>
+<footer><p><span class="dot"></span> Private by design. Your music files stay in this browser.</p><p>Output targets YMF278B / OPL4, not the SNES sound chip. Conversion approximates SNES effects.<br>Large soundtracks may take several minutes. Keep this tab open.</p><a href="./THIRD_PARTY_NOTICES.md">Third-party notices</a> · <a href="https://github.com/niekvlessert/spc2vgm">Source & licenses</a></footer>
+</main>
+<script type="module" src="./app.mjs"></script>
+</body>
+</html>

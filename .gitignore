@@ -3,3 +3,11 @@
 /.DS_Store
 *.swp
 external
+
+/build-web/
+/build-native/
+/web/dist/
+/node_modules/
+
+/web/licenses/
+/web/THIRD_PARTY_NOTICES.md

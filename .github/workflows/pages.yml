@@ -1,0 +1,69 @@
+name: Build browser converter and deploy Pages
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: '4.0.23'
+          actions-cache-folder: emsdk-cache
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build WebAssembly and static site
+        run: scripts/build_web.sh
+      - name: Install native reference dependencies
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
+      - name: Build native reference
+        run: |
+          cmake -S . -B build-native -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-native --target spc2vgm --parallel 4
+      - name: Verify browser output against native converter
+        run: |
+          node tests/web-smoke.cjs
+          python3 tests/prepare_archives.py
+          node tests/extract-test.cjs
+      - name: Verify ZIP packaging
+        run: |
+          node tests/zip-test.mjs
+          python3 tests/check_zip.py
+      - name: Test complete browser flow
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run test:browser
+          python3 tests/check_browser_zip.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spc2vgm-web
+          path: web/
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: web/
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment

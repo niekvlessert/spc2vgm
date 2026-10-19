@@ -56,6 +56,9 @@ int main(int argc, char **argv)
 	}
 
 	int extracted = 0, failed = 0;
+#ifdef __EMSCRIPTEN__
+    size_t total_size = 0;
+#endif
 	while (ar_parse_entry(archive)) {
 		const char *name = ar_entry_get_name(archive);
 		const char *base = name ? base_name(name) : "";
@@ -72,6 +75,20 @@ int main(int argc, char **argv)
 			failed = 1;
 			break;
 		}
+#ifdef __EMSCRIPTEN__
+        const size_t entry_size = ar_entry_get_size(archive);
+        if (entry_size > 16 * 1024 * 1024 || total_size + entry_size > 256 * 1024 * 1024 || extracted >= 2000) {
+            fprintf(stderr, "Archive exceeds browser extraction limits\n");
+            failed = 1; break;
+        }
+        total_size += entry_size;
+        FILE *existing = fopen(path, "rb");
+        if (existing) {
+            fclose(existing);
+            fprintf(stderr, "Duplicate SPC basename in archive: %s\n", base);
+            failed = 1; break;
+        }
+#endif
 		FILE *output = fopen(path, "wb");
 		if (!output) {
 			fprintf(stderr, "Unable to create: %s\n", path);

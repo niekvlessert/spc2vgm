@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { Zip, crc32 } from '../web/zip.mjs';
+assert.equal(crc32(new TextEncoder().encode('123456789')), 0xcbf43926);
+const zip = new Zip();
+await zip.add('音楽.vgm', new TextEncoder().encode('Vgm ' + 'abc'.repeat(2000)));
+await zip.add('_conversion-report.txt', new TextEncoder().encode('2 tracks\n'));
+await mkdir('build-web/test-fixtures', { recursive: true });
+await writeFile('build-web/test-fixtures/output.zip', new Uint8Array(await zip.blob().arrayBuffer()));
+const old = globalThis.CompressionStream;
+globalThis.CompressionStream = undefined;
+const stored = new Zip(); await stored.add('empty.vgm', new Uint8Array()); await stored.add('音楽.vgm', new TextEncoder().encode('Vgm '));
+await writeFile('build-web/test-fixtures/stored.zip', new Uint8Array(await stored.blob().arrayBuffer()));
+globalThis.CompressionStream = old;
+console.log('ZIP writer: CRC, Unicode names, DEFLATE and stored fallback generated');

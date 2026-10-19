@@ -63,11 +63,19 @@ struct Metadata {
 	std::string title, game, system = "Super Nintendo Entertainment System", artist, release_date, creator = "spc2vgm";
 	std::string notes = "Converted from SNES SPC music to YMF278B/OPL4 VGM using spc2vgm.";
 };
+static unsigned default_jobs() {
+#ifdef __EMSCRIPTEN__
+    return 1;
+#else
+    return std::max(1u, std::thread::hardware_concurrency());
+#endif
+}
+
 struct Options {
 	fs::path input, output, manifest, batch, batch_output, manifest_output;
 	std::string creator = "spc2vgm";
 	double playback = -1, fallback = 120, header_gain = 0, hardware_gain = 6;
-	int minimum_tl = 8, max_samples = 128, solo_voice = -1, jobs = std::max(1u, std::thread::hardware_concurrency());
+	int minimum_tl = 8, max_samples = 128, solo_voice = -1, jobs = default_jobs();
 	uint32_t opl4_ram_size = OPL4_DEFAULT_RAM_SIZE;
 	bool auto_playback = false, no_loop_detect = false, header_gain_set = false, debug = false, wav = false, prune_samples = false;
 };
@@ -735,10 +743,13 @@ static double matched_header_gain(const Bytes& data, const RamImage& ram, const 
 	if (traced_original) {
 		original = *traced_original;
 		converted = render_vgm_stats(provisional, tail.total);
+
+#ifndef __EMSCRIPTEN__
 	} else if (parallel) {
 		auto original_future = std::async(std::launch::async, [&] { return render_spc_stats(data, seconds, solo); });
 		converted = render_vgm_stats(provisional, tail.total);
 		original = original_future.get();
+#endif
 	} else {
 		original = render_spc_stats(data, seconds, solo);
 		converted = render_vgm_stats(provisional, tail.total);
@@ -826,4 +837,10 @@ static Options parse(int ac,char**av){
 		if(a=="-o"||a=="--output")o.output=value();else if(a=="--manifest")o.manifest=value();else if(a=="--batch")o.batch=value();else if(a=="--batch-output")o.batch_output=value();else if(a=="--manifest-output")o.manifest_output=value();else if(a=="--creator")o.creator=value();else if(a=="--playback")o.playback=std::stod(value());else if(a=="--fallback-seconds")o.fallback=std::stod(value());else if(a=="--playback-gain-db"){o.header_gain=std::stod(value());o.header_gain_set=true;}else if(a=="--hardware-gain-db")o.hardware_gain=std::stod(value());else if(a=="--minimum-tl")o.minimum_tl=std::stoi(value());else if(a=="--max-samples")o.max_samples=std::stoi(value());else if(a=="--solo-voice")o.solo_voice=std::stoi(value());else if(a=="--opl4-ram-kib"){auto kib=std::stoul(value());if(kib>2048)throw std::runtime_error("--opl4-ram-kib must be a multiple of 128 from 128 through 2048");o.opl4_ram_size=uint32_t(kib*1024);}else if(a=="--jobs")o.jobs=std::stoi(value());else if(a=="--debug")o.debug=true;else if(a=="--wav")o.wav=true;else if(a=="--auto-playback")o.auto_playback=true;else if(a=="--no-loop-detect")o.no_loop_detect=true;else if(a=="--prune-samples")o.prune_samples=true;else if(a=="--version"){std::cout<<"spc2vgm "<<SPC2VGM_VERSION<<'\n';std::exit(0);}else if(a=="-h"||a=="--help"){usage(av[0]);std::exit(0);}else if(a[0]=='-')throw std::runtime_error("unknown option "+a);else o.input=a;
 	}if(o.jobs<1)throw std::runtime_error("--jobs must be at least 1");if(o.opl4_ram_size<128*1024||o.opl4_ram_size>OPL4_MAX_RAM_SIZE||o.opl4_ram_size%(128*1024))throw std::runtime_error("--opl4-ram-kib must be a multiple of 128 from 128 through 2048");return o;
 }
-int main(int ac,char**av){try{Options o=parse(ac,av);if(!o.batch.empty()){if(o.debug||o.wav)throw std::runtime_error("--debug and --wav only accept a single SPC");fs::path out=o.batch_output.empty()?o.batch/"vgm":o.batch_output;std::vector<fs::path> files;for(auto&e:fs::directory_iterator(o.batch))if(e.path().extension()==".spc")files.push_back(e.path());std::sort(files.begin(),files.end());const int worker_count=std::min<int>(o.jobs,files.size());Options worker_options=o;if(worker_count>1)worker_options.jobs=1;size_t next=0;std::mutex work_mutex;std::exception_ptr failure;auto worker=[&]{for(;;){fs::path p;{std::lock_guard<std::mutex> lock(work_mutex);if(failure||next>=files.size())return;p=files[next++];}try{fs::path csv=o.manifest_output.empty()?fs::path{}:o.manifest_output/(p.stem().string()+".csv");convert(p,out/(p.stem().string()+".vgm"),csv,worker_options);}catch(const std::exception&e){std::lock_guard<std::mutex> lock(work_mutex);if(!failure)failure=std::make_exception_ptr(std::runtime_error(p.string()+": "+e.what()));return;}catch(...){std::lock_guard<std::mutex> lock(work_mutex);if(!failure)failure=std::current_exception();return;}}};std::vector<std::thread> workers;for(int i=0;i<worker_count;++i)workers.emplace_back(worker);for(auto&t:workers)t.join();if(failure)std::rethrow_exception(failure);return 0;}if(o.input.empty()){usage(av[0]);return 2;}if(o.debug){if(o.wav)throw std::runtime_error("--debug and --wav cannot be combined");debug_export(o.input,o);return 0;}if(o.output.empty()){o.output=o.input;o.output.replace_extension(".vgm");}convert(o.input,o.output,o.manifest,o);return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(int ac,char**av){try{Options o=parse(ac,av);if(!o.batch.empty()){if(o.debug||o.wav)throw std::runtime_error("--debug and --wav only accept a single SPC");fs::path out=o.batch_output.empty()?o.batch/"vgm":o.batch_output;std::vector<fs::path> files;for(auto&e:fs::directory_iterator(o.batch))if(e.path().extension()==".spc")files.push_back(e.path());std::sort(files.begin(),files.end());const int worker_count=std::min<int>(o.jobs,files.size());Options worker_options=o;if(worker_count>1)worker_options.jobs=1;size_t next=0;std::mutex work_mutex;std::exception_ptr failure;auto worker=[&]{for(;;){fs::path p;{std::lock_guard<std::mutex> lock(work_mutex);if(failure||next>=files.size())return;p=files[next++];}try{fs::path csv=o.manifest_output.empty()?fs::path{}:o.manifest_output/(p.stem().string()+".csv");convert(p,out/(p.stem().string()+".vgm"),csv,worker_options);}catch(const std::exception&e){std::lock_guard<std::mutex> lock(work_mutex);if(!failure)failure=std::make_exception_ptr(std::runtime_error(p.string()+": "+e.what()));return;}catch(...){std::lock_guard<std::mutex> lock(work_mutex);if(!failure)failure=std::current_exception();return;}}};
+#ifdef __EMSCRIPTEN__
+worker();
+#else
+std::vector<std::thread> workers;for(int i=0;i<worker_count;++i)workers.emplace_back(worker);for(auto&t:workers)t.join();
+#endif
+if(failure)std::rethrow_exception(failure);return 0;}if(o.input.empty()){usage(av[0]);return 2;}if(o.debug){if(o.wav)throw std::runtime_error("--debug and --wav cannot be combined");debug_export(o.input,o);return 0;}if(o.output.empty()){o.output=o.input;o.output.replace_extension(".vgm");}convert(o.input,o.output,o.manifest,o);return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

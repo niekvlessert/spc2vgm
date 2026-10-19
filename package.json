@@ -1,0 +1,10 @@
+{
+  "name": "spc2vgm-web-tests",
+  "private": true,
+  "scripts": {
+    "test:browser": "node tests/browser-smoke.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.58.2"
+  }
+}
