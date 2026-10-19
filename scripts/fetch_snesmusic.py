@@ -156,7 +156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path.cwd(), help="parent output directory")
     parser.add_argument("--creator", default=os.environ.get("USER", "spc2vgm"))
     parser.add_argument("--jobs", type=int)
-    parser.add_argument("--opl4-ram-kib", type=int, default=256, help="target MoonSound sample RAM in KiB; default: 256")
+    parser.add_argument("--opl4-ram-kib", type=int, default=256, help="target OPL4 sample RAM in KiB; default: 256")
     parser.add_argument("--profile", help="use this SNESmusic profile URL instead of searching")
     parser.add_argument("--download-only", action="store_true", help="download and extract SPCs without converting")
     return parser.parse_args()

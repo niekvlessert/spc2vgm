@@ -279,7 +279,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--game-name")
     parser.add_argument("--music-author")
     parser.add_argument("--system", default="Super Nintendo Entertainment System")
-    parser.add_argument("--hardware", default="Moonsound (YMF278B)")
+    parser.add_argument("--hardware", default="OPL4 (YMF278B)")
     parser.add_argument("--developer", default="Unknown")
     parser.add_argument("--publisher", default="Unknown")
     parser.add_argument("--release-date", default="Unknown")

@@ -152,7 +152,7 @@ requirements, file size, and MSX upload time.
 It also prevents unused or invalid-looking SPC directory entries from consuming
 the configured OPL4 RAM budget.
 
-`--opl4-ram-kib` selects the target MoonSound sample-RAM capacity. It defaults
+`--opl4-ram-kib` selects the target OPL4 sample-RAM capacity. It defaults
 to 256 KiB and accepts multiples of 128 KiB through 2048 KiB. For example,
 `--opl4-ram-kib 512` permits a 512 KiB decoded sample bank. Files requiring
 more RAM will not play correctly on cartridges with less installed sample RAM.
@@ -205,7 +205,7 @@ Package metadata can be supplied with `--game-name`, `--music-author`,
 `--version`, and `--notes`. Run `scripts/package_vgmrips.py --help` for all
 options. The package defaults identify the original system as
 `Super Nintendo Entertainment System` and playback hardware as
-`Moonsound (YMF278B)`.
+`OPL4 (YMF278B)`.
 
 ## Debugging tools
 
@@ -306,7 +306,7 @@ retain their existing multithreaded batch processing.
 Browser defaults match the soundtrack helper: automatic duration and volume
 matching, sample pruning, 256 KiB target sample RAM, and optional `vgm_cmp`
 optimization enabled. Track-length overrides are available for quick tests.
-Increasing RAM requires matching MoonSound hardware. A conversion report in
+Increasing RAM requires matching OPL4 hardware. A conversion report in
 the ZIP lists successful and failed tracks; failures do not silently disappear.
 
 To keep memory bounded, the initial web version accepts 64 MiB of total input,

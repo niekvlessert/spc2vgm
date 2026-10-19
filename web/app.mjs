@@ -70,7 +70,7 @@ $('convert').addEventListener('click', async () => {
   const active = () => { if (run !== id) throw new DOMException('Cancelled', 'AbortError'); };
   setBusy(true); clearDownload(); $('tracks').replaceChildren(); $('log').textContent = '';
   $('progress').hidden = false; $('progress').value = 0; $('progress').max = 1;
-  const report = [`spc2vgm browser conversion`, `Source: ${files.map(file => file.name).join(', ')}`, `MoonSound RAM: ${ram} KiB`, `Playback: ${seconds || 'automatic'} seconds`, `Sample pruning: enabled`, `vgm_cmp: ${optimize ? 'enabled' : 'disabled'}`, ''];
+  const report = [`spc2vgm browser conversion`, `Source: ${files.map(file => file.name).join(', ')}`, `OPL4 RAM: ${ram} KiB`, `Playback: ${seconds || 'automatic'} seconds`, `Sample pruning: enabled`, `vgm_cmp: ${optimize ? 'enabled' : 'disabled'}`, ''];
   try {
     let tracks;
     if (files.length === 1 && !/\.spc$/i.test(files[0].name)) {
